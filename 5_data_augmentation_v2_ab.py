@@ -40,7 +40,7 @@ PARTITIONS = config.PARTITIONS
 
 def sharpen_patch(patch):
     """
-    Recupera detalles de alta frecuencia.
+    Recupera detalles de alta frecuencia tras el escalado.
     """
     kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
     return cv2.filter2D(patch, -1, kernel)
@@ -310,7 +310,7 @@ def augment_partition(partition: str):
 
 if __name__ == '__main__':
     print("="*60)
-    print("  Data Augmentation V15: Smart Harmonization & Sharpness")
+    print("  Data Augmentation V15 (Final): Smart Harmonization & Sharpness")
     print("="*60)
     
     for p in PARTITIONS: augment_partition(p)
