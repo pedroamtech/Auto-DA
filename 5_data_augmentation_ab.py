@@ -4,23 +4,19 @@ import pandas as pd
 import os
 import sys
 import random
+import json
 from pathlib import Path
 from tqdm import tqdm
 from glob import glob
 from datetime import datetime
-
-# Importar YOLO para la segmentación precisa
-from ultralytics import YOLO
-import torch
 import logging
-logging.getLogger("ultralytics").setLevel(logging.WARNING)
 
 # Añadir el directorio people_pool al path para importar config
 sys.path.insert(0, str(Path(__file__).parent / 'people_pool'))
 import config
 
 # =============================================================================
-# CONFIGURACIÓN V9 (Alpha Blending + Heurísticas Anatómicas)
+# CONFIGURACIÓN V15 (Smart Harmonization & Contrast Preservation)
 # =============================================================================
 
 NUM_PEOPLE_PER_IMAGE = getattr(config, 'NUM_PEOPLE_X_IMG', 15)
@@ -30,10 +26,6 @@ MAX_SCALE = 1.30
 MIN_CROP_SIZE = 10
 BORDER_MARGIN = 20
 
-# cv2.NORMAL_CLONE = 1
-# cv2.MIXED_CLONE = 2
-BLEND_FLAG = cv2.NORMAL_CLONE
-
 ROOT_DATA       = Path(config.ROOT_DATA1)
 ROOT_OUTPUT_AUG = Path(config.ROOT_OUTPUT_AUG)
 ROOT_POOL_CSV   = Path(config.ROOT_POOL_PERSON)
@@ -41,6 +33,70 @@ ROOT_META_CSV   = Path(config.ROOT_VGGT_METADATA)
 DEPTH_MAPS_SUBDIR = 'depth_maps'
 
 PARTITIONS = config.PARTITIONS
+
+# =============================================================================
+# FUNCIONES DE ARMONIZACIÓN AVANZADA
+# =============================================================================
+
+def sharpen_patch(patch):
+    """
+    Recupera detalles de alta frecuencia tras el escalado.
+    """
+    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+    return cv2.filter2D(patch, -1, kernel)
+
+def apply_smart_harmonization(patch, bg_roi, mask):
+    """
+    Ajusta el tono y brillo sin perder contraste ni nitidez (Mean Shift en LAB).
+    """
+    mask_bool = mask > 128
+    if not np.any(mask_bool): return patch
+    
+    # Convertir a LAB
+    patch_lab = cv2.cvtColor(patch, cv2.COLOR_BGR2LAB).astype(np.float32)
+    bg_lab = cv2.cvtColor(bg_roi, cv2.COLOR_BGR2LAB).astype(np.float32)
+    
+    # Calcular medias
+    p_mean = np.mean(patch_lab[mask_bool], axis=0)
+    bg_mean = np.mean(bg_lab.reshape(-1, 3), axis=0)
+    
+    # Diferencia de color/brillo
+    diff = bg_mean - p_mean
+    
+    # Fuerza del ajuste (0.5 es un buen equilibrio para realismo sin lavar colores)
+    strength = 0.5
+    
+    # Aplicamos el desplazamiento de media
+    patch_lab += diff * strength
+    
+    # Clip para mantener dentro de rango
+    patch_lab = np.clip(patch_lab, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(patch_lab, cv2.COLOR_LAB2BGR)
+
+def add_contact_shadow(bg_roi, mask, nw, nh):
+    """
+    Sombra de contacto precisa bajo los pies.
+    """
+    y_coords, x_coords = np.where(mask > 128)
+    if len(y_coords) == 0: return bg_roi
+    
+    base_y = np.max(y_coords)
+    base_x = int(np.mean(x_coords[y_coords > base_y - 2]))
+    
+    shadow_mask = np.zeros((nh, nw), dtype=np.float32)
+    s_width = int(nw * 0.35)
+    s_height = int(nh * 0.04)
+    
+    cv2.ellipse(shadow_mask, (base_x, base_y), (s_width, s_height), 0, 0, 360, 1.0, -1)
+    
+    blur_s = 5
+    shadow_mask = cv2.GaussianBlur(shadow_mask, (blur_s, blur_s), 0)
+    
+    shadow_strength = 0.4 
+    for c in range(3):
+        bg_roi[:, :, c] = (bg_roi[:, :, c] * (1.0 - shadow_mask * shadow_strength)).astype(np.uint8)
+        
+    return bg_roi
 
 # =============================================================================
 # FUNCIONES: ESCALADO MÉTRICO Y DETECCIÓN DE SUELO
@@ -117,62 +173,17 @@ def create_semantic_ground_mask(bg_img, d_map, walkable_points):
     final_valid_mask[:, 0:BORDER_MARGIN] = 0; final_valid_mask[:, -BORDER_MARGIN:] = 0
     return final_valid_mask
 
-
 # =============================================================================
-# EXTRACCIÓN DE POLÍGONO CON YOLO-SEG (LearnOpenCV Style)
-# =============================================================================
-
-def extract_yolo_polygon_mask(crop_orig, nw, nh, yolo_model):
-    """
-    Usa YOLOv8x-Seg sobre la imagen original de alta resolución para aislar a la persona,
-    y luego redimensiona la máscara binaria al tamaño final (nw, nh).
-    """
-    orig_h, orig_w = crop_orig.shape[:2]
-    mask_binary = np.zeros((nh, nw), dtype=np.uint8)
-    
-    # Inferencia en el parche de alta resolución con parámetros ultra precisos
-    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-    results = yolo_model.predict(source=crop_orig, classes=[0], verbose=False, device=device, conf=0.1, retina_masks=True, imgsz=640)
-    
-    if len(results) > 0 and results[0].masks is not None:
-        mask_tensor = results[0].masks.data[0].cpu().numpy()
-        
-        # Redimensionamos la máscara directamente al tamaño final (nw, nh)
-        mask_binary = cv2.resize(mask_tensor, (nw, nh), interpolation=cv2.INTER_NEAREST)
-        mask_binary = (mask_binary * 255).astype(np.uint8)
-        
-        # Validación 1: Si la máscara es muy pequeña (menos del 15% del área), probablemente falló.
-        if cv2.countNonZero(mask_binary) < (nw * nh * 0.15):
-            return None
-            
-        # Validación 2: Heurística Matemática de Truncamiento/Oclusión
-        # Una silueta humana completa no debe estar cortada masivamente por los bordes.
-        
-        # Borde inferior (pies): Un par de pies no ocupan todo el ancho. Si ocupa >45%, el torso está cortado.
-        bottom_width = np.count_nonzero(mask_binary[-1, :])
-        if bottom_width > (nw * 0.45): return None
-        
-        # Borde superior (cabeza): La cabeza es estrecha. Si ocupa >35%, el cuerpo no tiene cabeza o está ocluido.
-        top_width = np.count_nonzero(mask_binary[0, :])
-        if top_width > (nw * 0.35): return None
-        
-        # Bordes laterales (brazos/torso lateral): Si está pegado masivamente a los lados, está cortado verticalmente.
-        left_height = np.count_nonzero(mask_binary[:, 0])
-        right_height = np.count_nonzero(mask_binary[:, -1])
-        if left_height > (nh * 0.40) or right_height > (nh * 0.40): return None
-            
-        return mask_binary
-
-    # Si YOLO no detectó nada, retornamos None para saltar este recorte en lugar de usar un octágono.
-    return None
-
-# =============================================================================
-# PIPELINE PRINCIPAL V7
+# PIPELINE PRINCIPAL V15
 # =============================================================================
 
-def augment_partition(partition: str, yolo_model):
+def augment_partition(partition: str):
     images_dir, labels_dir = ROOT_DATA / partition / 'images', ROOT_DATA / partition / 'labels'
-    pool_csv_p = ROOT_POOL_CSV / partition / 'pool.csv'
+    pool_dir = ROOT_POOL_CSV / partition
+    pool_csv_p = pool_dir / 'pool.csv'
+    masks_dir = pool_dir / 'masks'
+    meta_dir = pool_dir / 'metadata'
+    
     out_img_dir, out_lbl_dir = ROOT_OUTPUT_AUG / partition / 'images', ROOT_OUTPUT_AUG / partition / 'labels'
     out_img_dir.mkdir(parents=True, exist_ok=True); out_lbl_dir.mkdir(parents=True, exist_ok=True)
 
@@ -182,7 +193,7 @@ def augment_partition(partition: str, yolo_model):
 
     bg_images = [p for p in glob(str(images_dir / '*.jpg')) if not os.path.basename(p).startswith('depth_')]
 
-    for bg_path in tqdm(bg_images, desc=f'V7 YOLO-Seg {partition}', ncols=100):
+    for bg_path in tqdm(bg_images, desc=f'V15 Smart Harmonized {partition}', ncols=100):
         bg_name = os.path.basename(bg_path)
         bg_img = cv2.imread(bg_path)
         if bg_img is None: continue
@@ -224,40 +235,36 @@ def augment_partition(partition: str, yolo_model):
         bg_pitch = safe_float(bg_meta.get('pitch', -45.0), -45.0)
         df_compatible = df_pool[abs(df_pool['pitch'] - bg_pitch) <= PITCH_TOLERANCE]
         
-        bg_focal = safe_float(bg_meta.get('focal_y', 1000.0), 1000.0)
-        df_comp_res = df_compatible[
-            (df_compatible['focal_y'] >= bg_focal * 0.6) & 
-            (df_compatible['focal_y'] <= bg_focal * 1.4)
-        ]
-        if len(df_comp_res) >= NUM_PEOPLE_PER_IMAGE:
-            df_compatible = df_comp_res
-        # Filtro ULTRA ESTRICTO de CUERPO COMPLETO
-        # 1. Aspect Ratio: Entre 0.28 y 0.48 (Rango matemático de una persona de pie)
-        # 2. Altura Mínima: Al menos 45 píxeles originales para garantizar información visual para YOLO.
         aspect_ratio = df_compatible['width_patch'] / df_compatible['height_patch']
-        df_full_body = df_compatible[
-            (aspect_ratio >= 0.28) & 
-            (aspect_ratio <= 0.48) & 
-            (df_compatible['height_patch'] >= 45)
-        ]
-        
-        if len(df_full_body) >= NUM_PEOPLE_PER_IMAGE // 2:
+        df_full_body = df_compatible[(aspect_ratio >= 0.28) & (aspect_ratio <= 0.48)]
+        if len(df_full_body) >= NUM_PEOPLE_PER_IMAGE:
             df_compatible = df_full_body
 
         placed = 0
-        candidates = df_compatible.sample(n=min(NUM_PEOPLE_PER_IMAGE * 10, len(df_compatible)), replace=True)
+        candidates = df_compatible.sample(n=min(NUM_PEOPLE_PER_IMAGE * 20, len(df_compatible)), replace=True)
 
         for _, row in candidates.iterrows():
             if placed >= NUM_PEOPLE_PER_IMAGE: break
-            crop_orig = cv2.imread(row['name'])
-            if crop_orig is None: continue
+            
+            patch_path = Path(row['name'])
+            patch_stem = patch_path.stem
+            
+            json_p = meta_dir / f"{patch_stem}.json"
+            mask_p_file = masks_dir / f"{patch_stem}.png"
+            
+            if not json_p.exists() or not mask_p_file.exists(): continue
+            with open(json_p, 'r') as f: stats = json.load(f)
+            if not stats.get('is_valid', False): continue
+
+            crop_orig = cv2.imread(str(patch_path))
+            mask_orig = cv2.imread(str(mask_p_file), cv2.IMREAD_GRAYSCALE)
+            if crop_orig is None or mask_orig is None: continue
 
             for _ in range(5):
                 idx = random.randint(0, len(valid_x) - 1)
                 cx, cy = int(valid_x[idx]), int(valid_y[idx])
                 
                 scale = calculate_metric_scale_v5(row, bg_meta, d_map[cy, cx])
-                
                 if scale < MIN_SCALE or scale > MAX_SCALE: continue
                 
                 nw, nh = int(row['width_patch'] * scale), int(row['height_patch'] * scale)
@@ -266,60 +273,44 @@ def augment_partition(partition: str, yolo_model):
                 x1, y1 = cx - nw//2, cy - nh//2
                 if x1 < 0 or y1 < 0 or x1+nw >= bg_w or y1+nh >= bg_h: continue
 
+                # Recortes
                 crop = cv2.resize(crop_orig, (nw, nh), interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC)
+                mask_p = cv2.resize(mask_orig, (nw, nh), interpolation=cv2.INTER_NEAREST)
                 
-                # Extraemos la máscara exacta inferiendo sobre el recorte de Alta Resolución
-                mask_yolo = extract_yolo_polygon_mask(crop_orig, nw, nh, yolo_model)
+                # 1. Armonización Inteligente (Mean Shift LAB)
+                bg_roi = result_img[y1:y1+nh, x1:x1+nw].copy()
+                crop = apply_smart_harmonization(crop, bg_roi, mask_p)
                 
-                # Si YOLO no logró una segmentación coherente, descartamos este parche
-                if mask_yolo is None:
-                    continue
+                # 2. Enfoque Post-Armonización
+                crop = sharpen_patch(crop)
                 
-                # =====================================================================
-                # SOLUCIÓN: ALPHA BLENDING CON FEATHERING
-                # =====================================================================
-                # 1. Desenfoque suave SOLO A LA MÁSCARA para integrar los bordes.
-                # El tamaño del blur es proporcional al parche (mínimo 3x3).
-                blur_size = max(3, int(min(nw, nh) * 0.05))
-                if blur_size % 2 == 0: blur_size += 1
-                mask_blurred = cv2.GaussianBlur(mask_yolo, (blur_size, blur_size), 0)
+                # 3. Añadir Sombra de Contacto al fondo
+                bg_roi = add_contact_shadow(bg_roi, mask_p, nw, nh)
                 
-                # 2. Convertimos a canal Alfa (0.0 a 1.0)
+                # 4. Alpha Blending con Feathering Ajustado
+                blur_size = 3
+                mask_blurred = cv2.GaussianBlur(mask_p, (blur_size, blur_size), 0)
+                
                 alpha = mask_blurred.astype(float) / 255.0
                 alpha_3 = cv2.merge([alpha, alpha, alpha])
                 
                 try:
-                    # 3. Recortamos la región de fondo donde irá el parche
-                    bg_roi = result_img[y1:y1+nh, x1:x1+nw]
-                    
-                    # 4. Pegado matemático (Conserva 100% del color interior del parche)
                     blended = (crop.astype(float) * alpha_3) + (bg_roi.astype(float) * (1.0 - alpha_3))
-                    
-                    # 5. Insertamos en la imagen final
-                    result_img[y1:y1+nh, x1:x1+nw] = blended.astype(np.uint8)
+                    result_img[y1:y1+nh, x1:x1+nw] = np.clip(blended, 0, 255).astype(np.uint8)
                     
                     final_labels.append(f"0 {cx/bg_w:.6f} {cy/bg_h:.6f} {nw/bg_w:.6f} {nh/bg_h:.6f}")
                     placed += 1
                     break
-                except Exception as e:
+                except:
                     continue
 
-        out_name = f"{os.path.splitext(bg_name)[0]}_v9_{datetime.now().strftime('%H%M%S%f')}"
+        out_name = f"{os.path.splitext(bg_name)[0]}_v15_{datetime.now().strftime('%H%M%S%f')}"
         cv2.imwrite(str(out_img_dir / (out_name + '.jpg')), result_img)
         with open(str(out_lbl_dir / (out_name + '.txt')), 'w') as f: f.write('\n'.join(final_labels))
 
 if __name__ == '__main__':
     print("="*60)
-    print("  Seamless Augmentation V9: Alpha Blending Definitivo")
+    print("  Data Augmentation V15 (Final): Smart Harmonization & Sharpness")
     print("="*60)
     
-    # Cargamos el modelo YOLO de segmentación una sola vez en memoria
-    # Usamos YOLOv8x-seg (Extra Large) para máxima precisión en recortes difíciles.
-    print("[INFO] Cargando modelo YOLOv8x-Seg (Alta Precisión)...")
-    try:
-        yolo_model = YOLO('yolov8x-seg.pt')
-    except Exception as e:
-        print(f"[ERROR] No se pudo cargar YOLOv8x-seg: {e}")
-        sys.exit(1)
-        
-    for p in PARTITIONS: augment_partition(p, yolo_model)
+    for p in PARTITIONS: augment_partition(p)
