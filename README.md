@@ -13,7 +13,9 @@ El proyecto extrae parámetros de cámara de imágenes reales usando el modelo *
                                       ↓
                                3_people_pool.py
                                       ↓
-                         4_seamless_aug_depth_v9.py
+                               4_extract_masks.py
+                                      ↓
+                            5_data_augmentation_ab.py
 ```
 
 | Script | Función |
@@ -21,7 +23,8 @@ El proyecto extrae parámetros de cámara de imágenes reales usando el modelo *
 | `1_extract_information.py` | Extrae parámetros de cámara y genera depth maps (Visual y RAW) con VGGT. Soporta CLI y HF_TOKEN. |
 | `2_view_cluster.py` | Visualiza en 3D los grupos de cámaras (clustering KMeans). |
 | `3_people_pool.py` | Recorta personas del dataset (YOLO) y genera `pool.csv` con metadatos de cámara integrados. |
-| `4_seamless_aug_depth_v9.py` | **V9 Definitiva:** Pipeline superior que combina segmentación de alta precisión (YOLOv8x-Seg), heurísticas anatómicas estrictas y Alpha Blending con Feathering para insertar recortes con 100% de nitidez y cero lavado de color. |
+| `4_extract_masks.py` | **Pre-segmentación:** Usa YOLOv8x-Seg para extraer siluetas precisas de forma offline, acelerando el proceso de augmentación. |
+| `5_data_augmentation_ab.py` | **Principal:** Augmentación de alto realismo con **Smart Harmonization (LAB)**, sombras de contacto y escalado métrico. |
 
 ### Scripts auxiliares
 
@@ -63,7 +66,8 @@ DA-Seamless-Cloning/
 ├── 1_extract_information.py     # Paso 1: Extracción de cámara y profundidad
 ├── 2_view_cluster.py            # Paso 2: Visualización de clusters
 ├── 3_people_pool.py             # Paso 3: Creación del pool de personas
-├── 4_seamless_aug_depth_v9.py   # Paso 4: Augmentación (V9 Definitiva)
+├── 4_extract_masks.py           # Paso 4: Pre-segmentación de siluetas (YOLOv8x-Seg)
+├── 5_data_augmentation_ab.py    # Paso 5: Augmentación Principal (Smart Harmonization)
 ├── config.py                    # Configuración global de rutas
 ├── vggt/                        # Código fuente del modelo VGGT
 ├── people_pool/                 # Scripts de apoyo para el pool
@@ -80,16 +84,22 @@ Puedes usar el diálogo interactivo o pasar las rutas por CLI:
 python 1_extract_information.py --img_dir "ruta/fotos" --out_dir "ruta/salida" --batch 50
 ```
 
-### 2. Crear pool de personas
+### 2. Crear pool de personas e imágenes
 Configura las rutas en `config.py` y ejecuta:
 ```bash
 python 3_people_pool.py
 ```
 
-### 3. Augmentación con Profundidad e IA (V9 Definitiva)
-Este script busca automáticamente los mapas de profundidad RAW (`depth_*.png`) generados en el paso 1 para realizar un pegado geométricamente coherente, con ajuste de escala métrica, filtros anatómicos severos y segmentación basada en YOLOv8x-Seg.
+### 3. Pre-segmentación de siluetas
+Extrae las máscaras de las personas una sola vez para acelerar la augmentación:
 ```bash
-python 4_seamless_aug_depth_v9.py
+python 4_extract_masks.py
+```
+
+### 4. Augmentación con Smart Harmonization (V15)
+Este es el script principal de aumento. Utiliza las máscaras pre-calculadas para una ejecución rápida e integra a las personas con ajuste de color inteligente (LAB Shift) y sombras de contacto.
+```bash
+python 5_data_augmentation_ab.py
 ```
 
 ## Tecnologías
