@@ -1,11 +1,11 @@
 # =============================================================================
 # DA-Seamless-Cloning — Dependencias del proyecto
-# Python 3.13 | CUDA 13.0
+# Python 3.13 | CUDA 13.2
 # =============================================================================
 
-# PyTorch con soporte nativo CUDA 13.0
+# PyTorch con soporte nativo CUDA 13.2
 # Instalar desde el índice oficial de PyTorch:
---extra-index-url https://download.pytorch.org/whl/cu130
+--extra-index-url https://download.pytorch.org/whl/cu132
 torch
 torchvision
 torchaudio
