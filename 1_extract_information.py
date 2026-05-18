@@ -124,7 +124,7 @@ def extract_information_vx(batch_size=2):
         torch.cuda.empty_cache()
         print(f"Progreso: {min(i + batch_size, len(image_files))}/{len(image_files)}")
 
-    pd.DataFrame(data_records).to_csv(os.path.join(out_dir, "camera_data_vx.csv"), index=False)
+    pd.DataFrame(data_records).to_csv(os.path.join(out_dir, "camera_data.csv"), index=False)
     print("Extracción completada con éxito.")
 
 if __name__ == "__main__":
