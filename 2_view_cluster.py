@@ -30,7 +30,7 @@ def convert_to_plot(points):
 
 def view_cluster_vx():
     root = Tk(); root.withdraw()
-    csv_path = filedialog.askopenfilename(title="Selecciona camera_data_vx.csv")
+    csv_path = filedialog.askopenfilename(title="Selecciona camera_data.csv")
     root.destroy()
     if not csv_path: return
     
