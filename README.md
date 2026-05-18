@@ -37,15 +37,26 @@ El proyecto extrae parámetros de cámara de imágenes reales usando el modelo *
 
 ### Entorno
 
-- **Python** 3.13
-- **CUDA** 13.0 (recomendado, GPU NVIDIA)
-- **PyTorch** compatible con CUDA 13.0.
+- **Python** 3.13.9 (Recomendado entorno virtual conda)
+- **CUDA** 13.2 (recomendado, GPU NVIDIA)
+- **PyTorch** compatible con CUDA 13.2.
 
-### Dependencias Principales
+### Instalación en Anaconda
 
-`torch`, `numpy`, `pandas`, `opencv-python`, `scikit-learn`, `matplotlib`, `tqdm`, `huggingface_hub`, `einops`.
+1. **Clonar el repositorio:**
+```bash
+git clone https://github.com/pedroamtech/DA-Seamless-Cloning.git
+cd DA-Seamless-Cloning
+```
 
-Instalar mediante:
+2. **Crear y activar el entorno conda:**
+```bash
+conda create --name data_augmentation python=3.13.9
+conda activate data_augmentation
+```
+
+3. **Instalar requerimientos:**
+El archivo `requirements_da.txt` está configurado para descargar la versión correcta de PyTorch con soporte para CUDA 13.2 y todas las dependencias del proyecto (`torch`, `numpy`, `opencv-python`, `ultralytics`, etc.):
 ```bash
 pip install -r requirements_da.txt
 ```
