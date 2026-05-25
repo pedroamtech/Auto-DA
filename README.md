@@ -4,7 +4,7 @@ Pipeline de **Data Augmentation** para datasets de detección de personas, combi
 
 ## Descripción
 
-El proyecto extrae parámetros de cámara de imágenes reales usando el modelo **VGGT** (Facebook Research), agrupa las vistas en clusters, construye un pool de recortes de personas y los inserta en nuevas imágenes de fondo con restricción de profundidad mediante `cv2.seamlessClone`.
+El proyecto extrae parámetros de cámara de imágenes reales usando el modelo **VGGT** (Facebook Research), agrupa las vistas en clusters, construye un pool de recortes de personas y los inserta en nuevas imágenes de fondo con escalado métrico basado en profundidad. La segmentación de siluetas se realiza offline con un pipeline **YOLOv8x (detección) + SAM2-L (segmentación)** para obtener máscaras de alta precisión.
 
 ## Pipeline
 
@@ -23,8 +23,8 @@ El proyecto extrae parámetros de cámara de imágenes reales usando el modelo *
 | `1_extract_information.py` | Extrae parámetros de cámara y genera depth maps (Visual y RAW) con VGGT. Soporta CLI y HF_TOKEN. |
 | `2_view_cluster.py` | Visualiza en 3D los grupos de cámaras (clustering KMeans). |
 | `3_people_pool.py` | Recorta personas del dataset (YOLO) y genera `pool.csv` con metadatos de cámara integrados. |
-| `4_extract_masks.py` | **Pre-segmentación:** Usa YOLOv8x-Seg para extraer siluetas precisas de forma offline, acelerando el proceso de augmentación. |
-| `5_data_augmentation_ab.py` | **Principal:** Augmentación de alto realismo con **Smart Harmonization (LAB)**, sombras de contacto y escalado métrico. |
+| `4_extract_masks.py` | **Pre-segmentación:** Pipeline **YOLOv8x → SAM2-L** para extraer siluetas de alta precisión de forma offline. Pesos descargados automáticamente en la primera ejecución. |
+| `5_data_augmentation_ab.py` | **Principal:** Inserción de personas con escalado métrico por profundidad y alpha blending con feathering. Preserva el color original de cada parche. |
 
 ### Scripts auxiliares
 
@@ -77,8 +77,8 @@ DA-Seamless-Cloning/
 ├── 1_extract_information.py     # Paso 1: Extracción de cámara y profundidad
 ├── 2_view_cluster.py            # Paso 2: Visualización de clusters
 ├── 3_people_pool.py             # Paso 3: Creación del pool de personas
-├── 4_extract_masks.py           # Paso 4: Pre-segmentación de siluetas (YOLOv8x-Seg)
-├── 5_data_augmentation_ab.py    # Paso 5: Augmentación Principal (Smart Harmonization)
+├── 4_extract_masks.py           # Paso 4: Pre-segmentación de siluetas (YOLOv8x + SAM2-L)
+├── 5_data_augmentation_ab.py    # Paso 5: Augmentación Principal (escalado métrico + alpha blending)
 ├── config.py                    # Configuración global de rutas
 ├── vggt/                        # Código fuente del modelo VGGT
 ├── people_pool/                 # Scripts de apoyo para el pool
@@ -102,13 +102,13 @@ python 3_people_pool.py
 ```
 
 ### 3. Pre-segmentación de siluetas
-Extrae las máscaras de las personas una sola vez para acelerar la augmentación:
+Extrae las máscaras de las personas una sola vez (pipeline YOLOv8x → SAM2-L). Los pesos se descargan automáticamente en la primera ejecución (`yolov8x.pt` ~130 MB, `sam2_l.pt` ~428 MB):
 ```bash
 python 4_extract_masks.py
 ```
 
-### 4. Augmentación con Smart Harmonization (V15)
-Este es el script principal de aumento. Utiliza las máscaras pre-calculadas para una ejecución rápida e integra a las personas con ajuste de color inteligente (LAB Shift) y sombras de contacto.
+### 4. Augmentación
+Inserta los recortes en nuevas imágenes usando las máscaras pre-calculadas, con escalado métrico basado en mapa de profundidad y alpha blending con feathering:
 ```bash
 python 5_data_augmentation_ab.py
 ```
@@ -116,8 +116,9 @@ python 5_data_augmentation_ab.py
 ## Tecnologías
 
 - **[VGGT](https://github.com/facebookresearch/vggt)** — Estimación de cámara y profundidad (Facebook Research).
-- **OpenCV** (`cv2.GaussianBlur`, `cv2.copyMakeBorder`) — Procesamiento morfológico y de imagen.
-- **Ultralytics (YOLOv8)** — Segmentación paramétrica y extracción de siluetas.
+- **OpenCV** — Procesamiento de imagen y alpha blending con feathering.
+- **Ultralytics YOLOv8x** — Detección de personas (bounding box).
+- **Ultralytics SAM2-L** — Segmentación de alta precisión a partir del bounding box (Meta AI).
 - **Hugging Face Hub** — Gestión del modelo pre-entrenado VGGT-1B.
 
 ## Autor

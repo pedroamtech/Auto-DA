@@ -30,7 +30,9 @@ scikit-learn
 # Visión por computadora (2_people_pool.py, 3_seamless_aug_depth.py,
 #                         yolo_person_labeler.py, video_to_frames.py)
 opencv-python
-ultralytics
+ultralytics>=8.1.0   # SAM2 incluido desde 8.1; pesos descargados automáticamente al ejecutar:
+                     #   yolov8x.pt  (~130 MB) — detección de personas
+                     #   sam2_l.pt   (~428 MB) — segmentación de siluetas
 
 # Barras de progreso (2_people_pool.py, 3_seamless_aug_depth.py)
 tqdm
