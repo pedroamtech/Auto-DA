@@ -277,17 +277,9 @@ def augment_partition(partition: str):
                 crop = cv2.resize(crop_orig, (nw, nh), interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC)
                 mask_p = cv2.resize(mask_orig, (nw, nh), interpolation=cv2.INTER_NEAREST)
                 
-                # 1. Armonización Inteligente (Mean Shift LAB)
                 bg_roi = result_img[y1:y1+nh, x1:x1+nw].copy()
-                crop = apply_smart_harmonization(crop, bg_roi, mask_p)
-                
-                # 2. Enfoque Post-Armonización
-                crop = sharpen_patch(crop)
-                
-                # 3. Añadir Sombra de Contacto al fondo
-                bg_roi = add_contact_shadow(bg_roi, mask_p, nw, nh)
-                
-                # 4. Alpha Blending con Feathering Ajustado
+
+                # Alpha Blending con Feathering Ajustado
                 blur_size = 3
                 mask_blurred = cv2.GaussianBlur(mask_p, (blur_size, blur_size), 0)
                 
