@@ -102,23 +102,20 @@ def process_pool():
     print(f"[INFO] Cargando SAM2-L (segmentación) en {DEVICE}...")
     sam_model = SAM(SAM_MODEL)
 
-    for partition in PARTITIONS:
-        pool_dir  = ROOT_POOL_PERSON / partition
-        pool_csv_p = pool_dir / 'pool.csv'
+    pool_csv_p = ROOT_POOL_PERSON / 'pool.csv'
+    if not pool_csv_p.exists():
+        print(f"[WARN] No se encontró pool.csv en {ROOT_POOL_PERSON}")
+        return
 
-        if not pool_csv_p.exists():
-            print(f"[WARN] No se encontró pool.csv en {pool_dir}")
-            continue
+    masks_dir = ROOT_POOL_PERSON / 'masks'
+    meta_dir  = ROOT_POOL_PERSON / 'metadata'
+    masks_dir.mkdir(parents=True, exist_ok=True)
+    meta_dir.mkdir(parents=True, exist_ok=True)
 
-        masks_dir = pool_dir / 'masks'
-        meta_dir  = pool_dir / 'metadata'
-        masks_dir.mkdir(parents=True, exist_ok=True)
-        meta_dir.mkdir(parents=True, exist_ok=True)
+    df_pool = pd.read_csv(str(pool_csv_p))
+    print(f"[INFO] Procesando pool ({len(df_pool)} parches)...")
 
-        df_pool = pd.read_csv(str(pool_csv_p))
-        print(f"[INFO] Procesando partición: {partition} ({len(df_pool)} parches)")
-
-        for _, row in tqdm(df_pool.iterrows(), total=len(df_pool), desc=f"Segmentando {partition}"):
+    for _, row in tqdm(df_pool.iterrows(), total=len(df_pool), desc="Segmentando"):
             img_path = Path(row['name'])
             if not img_path.exists():
                 continue
