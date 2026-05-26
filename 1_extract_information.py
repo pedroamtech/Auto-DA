@@ -26,7 +26,7 @@ except ImportError:
     print("Error: No se encuentran los módulos de VGGT. Ejecuta desde la raíz del proyecto.")
     sys.exit(1)
 
-def extract_information(batch_size=64):
+def extract_information(batch_size=32):
     # 1. Configuración del modelo (se carga una sola vez para todas las particiones)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -79,7 +79,8 @@ def extract_information(batch_size=64):
         print(f"  CSV        -> {csv_path}")
 
         # 3. Procesamiento por batches
-        with tqdm(total=len(image_files), desc=f"[{partition}] Extrayendo", unit="img", ncols=100) as pbar:
+        n_batches = len(range(0, len(image_files), batch_size))
+        with tqdm(total=n_batches, desc=f"[{partition}] Extrayendo", unit="batch", ncols=100) as pbar:
             for i in range(0, len(image_files), batch_size):
                 batch_files = image_files[i : i + batch_size]
                 images_tensor = load_and_preprocess_images(batch_files).to(device)
@@ -130,7 +131,7 @@ def extract_information(batch_size=64):
 
                 del images_tensor, predictions, pose_enc, depth_data
                 torch.cuda.empty_cache()
-                pbar.update(len(batch_files))
+                pbar.update(1)
 
         pd.DataFrame(data_records).to_csv(csv_path, index=False)
         print(f"[{partition}] CSV guardado en: {csv_path}")
