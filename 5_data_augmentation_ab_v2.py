@@ -219,8 +219,9 @@ def augment_partition(partition: str):
         if len(valid_x) < 100:
             continue
 
-        result_img   = bg_img.copy()
-        final_labels = original_labels.copy()
+        result_img    = bg_img.copy()
+        final_labels  = original_labels.copy()
+        aug_labels    = []  # solo las bboxes insertadas por aumentación
 
         bg_pitch     = safe_float(bg_meta.get('pitch', -45.0), -45.0)
         df_compatible = df_pool[abs(df_pool['pitch'] - bg_pitch) <= PITCH_TOLERANCE]
@@ -309,9 +310,9 @@ def augment_partition(partition: str):
                     try:
                         blended = (crop.astype(float) * alpha_3) + (bg_roi.astype(float) * (1.0 - alpha_3))
                         result_img[y1:y1+nh, x1:x1+nw] = np.clip(blended, 0, 255).astype(np.uint8)
-                        final_labels.append(
-                            f"0 {cx/bg_w:.6f} {cy/bg_h:.6f} {nw/bg_w:.6f} {nh/bg_h:.6f}"
-                        )
+                        bbox_str = f"0 {cx/bg_w:.6f} {cy/bg_h:.6f} {nw/bg_w:.6f} {nh/bg_h:.6f}"
+                        final_labels.append(bbox_str)
+                        aug_labels.append(bbox_str)
                         placed_in_bin += 1
                         img_placed_heights.append(nh)
                         break
@@ -322,6 +323,8 @@ def augment_partition(partition: str):
         cv2.imwrite(str(out_img_dir / (out_name + '.jpg')), result_img)
         with open(str(out_lbl_dir / (out_name + '.txt')), 'w') as f:
             f.write('\n'.join(final_labels))
+        with open(str(out_lbl_dir / (out_name + '_aug.txt')), 'w') as f:
+            f.write('\n'.join(aug_labels))
 
         partition_heights.extend(img_placed_heights)
 
