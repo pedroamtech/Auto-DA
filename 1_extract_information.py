@@ -47,8 +47,8 @@ def extract_information_vx(batch_size=2):
     for partition in config.PARTITIONS:
         partition_dir = Path(config.ROOT_DATA1) / partition
         img_dir   = partition_dir / 'images'
-        depth_dir = partition_dir / 'depth_maps'   # mismo nivel que images/
-        csv_path  = partition_dir / 'camera_data.csv'
+        depth_dir = partition_dir / 'depth_maps'
+        csv_path  = depth_dir / 'camera_data.csv'
 
         if not img_dir.exists():
             print(f"[{partition}] Carpeta de imágenes no encontrada: {img_dir}")
