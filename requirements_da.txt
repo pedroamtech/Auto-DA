@@ -1,10 +1,9 @@
 # =============================================================================
-# DA-Seamless-Cloning — Dependencias del proyecto
+# Auto-DA — Dependencias del proyecto
 # Python 3.13 | CUDA 13.2
 # =============================================================================
 
-# PyTorch con soporte nativo CUDA 13.2
-# Instalar desde el índice oficial de PyTorch:
+# PyTorch con soporte CUDA 13.2
 --extra-index-url https://download.pytorch.org/whl/cu132
 torch
 torchvision
@@ -24,17 +23,18 @@ matplotlib
 # Datos tabulares
 pandas
 
-# Clustering y escalado (1_view_cluster.py)
+# Clustering y escalado (2_view_cluster.py)
 scikit-learn
 
-# Visión por computadora (2_people_pool.py, 3_seamless_aug_depth.py,
-#                         yolo_person_labeler.py, video_to_frames.py)
+# Visión por computadora
+# (3_people_pool.py, 4_extract_masks.py, 5_data_augmentation.py,
+#  tools/yolo_person_labeler.py, tools/video_to_frames.py)
 opencv-python
-ultralytics>=8.1.0   # SAM2 incluido desde 8.1; pesos descargados automáticamente al ejecutar:
+ultralytics>=8.1.0   # SAM2 incluido desde 8.1; pesos descargados automáticamente:
                      #   yolov8x.pt  (~130 MB) — detección de personas
                      #   sam2_l.pt   (~428 MB) — segmentación de siluetas
 
-# Barras de progreso (2_people_pool.py, 3_seamless_aug_depth.py)
+# Barras de progreso (3_people_pool.py, 4_extract_masks.py, 5_data_augmentation.py)
 tqdm
 
 # =============================================================================
