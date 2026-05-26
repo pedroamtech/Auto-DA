@@ -41,7 +41,7 @@ def _poolCreation(args):
     if img is None:
         return []
 
-    depth_dir  = root_data / 'images' / 'depth_maps'
+    depth_dir  = root_data / 'depth_maps'
     depth_path = depth_dir / f"depth_{img_name}"
     depth_map  = None
     if depth_path.exists():
@@ -104,9 +104,9 @@ def _poolCreation(args):
 def poolCreation(root_data_list, root_output, num_process=10):
     root_output.mkdir(parents=True, exist_ok=True)
 
-    meta_csv_path = getattr(config, 'ROOT_VGGT_METADATA', None)
-    if meta_csv_path is None:
-        raise ValueError("ROOT_VGGT_METADATA no definido en config.py")
+    meta_csv_path = root_data_list[0] / 'depth_maps' / 'camera_data.csv'
+    if not meta_csv_path.exists():
+        raise FileNotFoundError(f"No se encontró camera_data.csv en: {meta_csv_path}")
 
     print(f"\n[INFO] Cargando metadatos desde: {meta_csv_path}")
     df_meta = pd.read_csv(meta_csv_path)
