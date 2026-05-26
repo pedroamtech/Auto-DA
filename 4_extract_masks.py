@@ -95,10 +95,10 @@ def process_pool():
     print("  Pre-segmentación YOLO-det + SAM2 para People Pool")
     print("="*60)
 
-    print(f"[INFO] Cargando YOLOv8x (detección) en {DEVICE}...")
+    print(f"[INFO] Cargando modelo de detección: {DET_MODEL} en {DEVICE}...")
     det_model = YOLO(DET_MODEL)
 
-    print(f"[INFO] Cargando SAM2-L (segmentación) en {DEVICE}...")
+    print(f"[INFO] Cargando modelo de segmentación: {SAM_MODEL} en {DEVICE}...")
     sam_model = SAM(SAM_MODEL)
 
     pool_csv_p = ROOT_POOL_PERSON / 'pool.csv'
