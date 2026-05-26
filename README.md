@@ -20,11 +20,13 @@ El proyecto extrae parámetros de cámara de imágenes reales usando el modelo *
 
 | Script | Función |
 |---|---|
-| `1_extract_information.py` | Extrae parámetros de cámara y genera depth maps con VGGT. Lee rutas desde `config.py`. Guarda `depth_maps/` y `camera_data.csv` al mismo nivel que `images/`. |
+| `1_extract_information.py` | Extrae parámetros de cámara y genera depth maps con VGGT. Lee rutas desde `config.py`. Guarda `depth_maps/` y `camera_data.csv` al mismo nivel que `images/`. Muestra info de GPU/CUDA al inicio. |
 | `2_view_cluster.py` | Visualiza en 3D los grupos de cámaras (clustering KMeans). Pide el número de clusters por diálogo. |
 | `3_people_pool.py` | Recorta personas del dataset (YOLO labels), filtra por rango de altura y genera `pool.csv` con metadatos de cámara integrados. |
-| `4_extract_masks.py` | Pre-segmentación offline: pipeline **YOLOv8x → SAM2-L** para extraer siluetas de alta precisión. |
+| `4_extract_masks.py` | Pre-segmentación offline: pipeline **YOLOv8x → SAM2-L** para extraer siluetas de alta precisión. Muestra info de GPU/CUDA al inicio. |
 | `5_data_augmentation.py` | Inserción de personas con escalado métrico por profundidad y alpha blending. Genera un archivo `_aug.txt` por imagen con solo las bboxes aumentadas. |
+
+> Todos los scripts del pipeline imprimen el tiempo total de ejecución al finalizar (`00h 00m 00.00s`).
 
 ### Scripts auxiliares — `tools/`
 
@@ -123,11 +125,11 @@ Por cada imagen aumentada se generan en `ROOT_OUTPUT_AUG/{partition}/`:
 
 ```
 images/
-└── {nombre}_v2_HHMMSS.jpg        ← imagen con personas insertadas
+└── {nombre}_aug_HHMMSSffffff.jpg            ← imagen con personas insertadas
 
 labels/
-├── {nombre}_v2_HHMMSS.txt        ← todas las bboxes (original + aumentadas) en formato YOLO
-└── {nombre}_v2_HHMMSS_aug.txt    ← solo las bboxes insertadas por aumentación
+├── {nombre}_aug_HHMMSSffffff.txt            ← todas las bboxes (original + aumentadas) en formato YOLO
+└── {nombre}_aug_HHMMSSffffff_aug.txt        ← solo las bboxes insertadas por aumentación
 ```
 
 ## Tecnologías
