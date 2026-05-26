@@ -10,11 +10,7 @@ import config
 import numpy as np
 
 # =============================================================================
-# CONFIGURACIÓN V2
-# Cambios respecto a v1:
-#   - Filtra crops por HEIGHT_MIN / HEIGHT_MAX (config values, ahora aplicados)
-#   - Añade columna 'height_bin' al CSV para facilitar el muestreo estratificado
-#   - Imprime distribución de tamaños del pool al finalizar
+# CONFIGURACIÓN
 # =============================================================================
 
 HEIGHT_MIN = config.HEIGHT_MIN  # px — altura mínima de crop aceptada
@@ -166,7 +162,7 @@ def poolCreation(root_data_list, root_output, num_process=10):
 
     # V2: distribución de tamaños del pool
     total = len(df_final)
-    print(f"\n[V2] Distribución del pool por bin de altura ({HEIGHT_MIN}–{HEIGHT_MAX} px) — {total} crops:")
+    print(f"\nDistribución del pool por bin de altura ({HEIGHT_MIN}–{HEIGHT_MAX} px) — {total} crops:")
     bin_ranges = {
         'xs': (HEIGHT_MIN,                         HEIGHT_MIN + (HEIGHT_MAX - HEIGHT_MIN) // 4),
         's':  (HEIGHT_MIN + (HEIGHT_MAX - HEIGHT_MIN) // 4,  HEIGHT_MIN + (HEIGHT_MAX - HEIGHT_MIN) // 2),
@@ -179,7 +175,7 @@ def poolCreation(root_data_list, root_output, num_process=10):
         bar   = '█' * int(pct / 2)
         print(f"  {label} [{lo:2d}–{hi:2d}px]: {count:6d} ({pct:5.1f}%) {bar}")
 
-    print(f"\n[INFO] Pool v2 guardado en: {output_csv}")
+    print(f"\n[INFO] Pool guardado en: {output_csv}")
     print(f"       Columnas: {df_final.columns.tolist()}")
 
 

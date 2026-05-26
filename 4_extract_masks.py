@@ -16,7 +16,6 @@ import config
 # CONFIGURACIÓN
 # =============================================================================
 ROOT_POOL_PERSON = Path(config.ROOT_POOL_PERSON)
-PARTITIONS = config.PARTITIONS
 DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
 # YOLOv8x para detección (bounding box) + SAM2-L para segmentación precisa
@@ -115,31 +114,44 @@ def process_pool():
     df_pool = pd.read_csv(str(pool_csv_p))
     print(f"[INFO] Procesando pool ({len(df_pool)} parches)...")
 
+    n_valid = 0
+    n_invalid = 0
+    n_skipped = 0
+
     for _, row in tqdm(df_pool.iterrows(), total=len(df_pool), desc="Segmentando"):
-            img_path = Path(row['name'])
-            if not img_path.exists():
-                continue
+        img_path = Path(row['name'])
+        if not img_path.exists():
+            n_skipped += 1
+            continue
 
-            patch_name = img_path.stem
-            mask_path  = masks_dir / f"{patch_name}.png"
-            json_path  = meta_dir  / f"{patch_name}.json"
+        patch_name = img_path.stem
+        mask_path  = masks_dir / f"{patch_name}.png"
+        json_path  = meta_dir  / f"{patch_name}.json"
 
-            if mask_path.exists() and json_path.exists():
-                continue
+        if mask_path.exists() and json_path.exists():
+            n_skipped += 1
+            continue
 
-            img = cv2.imread(str(img_path))
-            if img is None:
-                continue
+        img = cv2.imread(str(img_path))
+        if img is None:
+            n_skipped += 1
+            continue
 
-            mask, stats = extract_mask(img, det_model, sam_model)
+        mask, stats = extract_mask(img, det_model, sam_model)
 
-            with open(json_path, 'w') as f:
-                json.dump(stats, f, indent=4)
+        with open(json_path, 'w') as f:
+            json.dump(stats, f, indent=4)
 
-            if mask is not None:
-                cv2.imwrite(str(mask_path), mask)
+        if mask is not None:
+            cv2.imwrite(str(mask_path), mask)
+            n_valid += 1
+        else:
+            n_invalid += 1
 
-    print("\n[SUCCESS] Pre-segmentación completada.")
+    print(f"\n[SUCCESS] Pre-segmentación completada.")
+    print(f"  Máscaras válidas:   {n_valid}")
+    print(f"  Máscaras inválidas: {n_invalid}")
+    print(f"  Omitidas (ya existían o no encontradas): {n_skipped}")
 
 
 if __name__ == '__main__':

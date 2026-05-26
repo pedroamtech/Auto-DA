@@ -130,9 +130,9 @@ def create_semantic_ground_mask(bg_img, d_map, walkable_points):
 def _print_distribution(partition, heights):
     total = len(heights)
     if total == 0:
-        print(f"  [V2] {partition}: sin personas insertadas.")
+        print(f"  [{partition}] Sin personas insertadas.")
         return
-    print(f"\n[V2] Distribución de alturas insertadas — {partition} ({total} personas):")
+    print(f"\nDistribución de alturas insertadas — {partition} ({total} personas):")
     for bin_lo, bin_hi in SIZE_BINS_PX:
         count = sum(1 for h in heights if bin_lo <= h < bin_hi)
         pct   = 100 * count / total
@@ -145,7 +145,7 @@ def _save_distribution_csv(out_dir, partition, heights):
         return
     csv_path = out_dir / f'size_distribution_{partition}.csv'
     pd.DataFrame({'height_px': heights}).to_csv(str(csv_path), index=False)
-    print(f"[V2] Distribución guardada en: {csv_path}")
+    print(f"Distribución guardada en: {csv_path}")
 
 # =============================================================================
 # PIPELINE PRINCIPAL V2
@@ -165,6 +165,7 @@ def augment_partition(partition: str):
     out_lbl_dir.mkdir(parents=True, exist_ok=True)
 
     if not pool_csv_p.exists():
+        print(f"[ERROR] No se encontró pool.csv en: {pool_csv_p}")
         return
     df_pool    = pd.read_csv(str(pool_csv_p))
     df_bg_meta = pd.read_csv(meta_csv).set_index('image_name')
@@ -174,7 +175,8 @@ def augment_partition(partition: str):
 
     partition_heights = []  # V2: acumula alturas de todas las personas insertadas
 
-    for bg_path in tqdm(bg_images, desc=f'V2 Stratified {partition}', ncols=100):
+    print(f"[{partition}] {len(bg_images)} imágenes | pool: {len(df_pool)} crops | salida: {out_img_dir}")
+    for bg_path in tqdm(bg_images, desc=f'Augmentando {partition}', ncols=100):
         bg_name = os.path.basename(bg_path)
         bg_img  = cv2.imread(bg_path)
         if bg_img is None:
@@ -319,7 +321,7 @@ def augment_partition(partition: str):
                     except:
                         continue
 
-        out_name = f"{os.path.splitext(bg_name)[0]}_v2_{datetime.now().strftime('%H%M%S%f')}"
+        out_name = f"{os.path.splitext(bg_name)[0]}_aug_{datetime.now().strftime('%H%M%S%f')}"
         cv2.imwrite(str(out_img_dir / (out_name + '.jpg')), result_img)
         with open(str(out_lbl_dir / (out_name + '.txt')), 'w') as f:
             f.write('\n'.join(final_labels))
@@ -335,9 +337,10 @@ def augment_partition(partition: str):
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("  Data Augmentation V2 — Stratified Size Sampling")
-    print(f"  Bins: {SIZE_BINS_PX}")
-    print(f"  Target por bin por imagen: {TARGET_PER_BIN}")
+    print("  Data Augmentation — Stratified Size Sampling")
+    print(f"  Bins de tamaño: {SIZE_BINS_PX}")
+    print(f"  Personas por bin por imagen: {TARGET_PER_BIN}")
+    print(f"  Particiones: {PARTITIONS}")
     print("=" * 60)
 
     for p in PARTITIONS:

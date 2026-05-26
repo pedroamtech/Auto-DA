@@ -60,8 +60,14 @@ def extract_information_vx(batch_size=2):
             str(img_dir / f) for f in os.listdir(img_dir)
             if f.lower().endswith(valid_exts)
         ])
+        if not image_files:
+            print(f"[{partition}] No se encontraron imágenes en: {img_dir}")
+            continue
+
         data_records = []
         print(f"\n[{partition}] Procesando {len(image_files)} imágenes en batches de {batch_size}...")
+        print(f"  Depth maps -> {depth_dir}")
+        print(f"  CSV        -> {csv_path}")
 
         # 3. Procesamiento por batches
         for i in range(0, len(image_files), batch_size):
