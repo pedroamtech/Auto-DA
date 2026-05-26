@@ -1,3 +1,4 @@
+import time
 import cv2
 import numpy as np
 import pandas as pd
@@ -155,4 +156,7 @@ def process_pool():
 
 
 if __name__ == '__main__':
+    t0 = time.perf_counter()
     process_pool()
+    elapsed = time.perf_counter() - t0
+    print(f"\nTiempo total: {int(elapsed//3600):02d}h {int(elapsed%3600//60):02d}m {elapsed%60:05.2f}s")

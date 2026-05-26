@@ -1,3 +1,4 @@
+import time
 import cv2
 import numpy as np
 import pandas as pd
@@ -343,5 +344,8 @@ if __name__ == '__main__':
     print(f"  Particiones: {PARTITIONS}")
     print("=" * 60)
 
+    t0 = time.perf_counter()
     for p in PARTITIONS:
         augment_partition(p)
+    elapsed = time.perf_counter() - t0
+    print(f"\nTiempo total: {int(elapsed//3600):02d}h {int(elapsed%3600//60):02d}m {elapsed%60:05.2f}s")

@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 from pathlib import Path
 
 # Añadir el directorio raíz de VGGT al path para encontrar el paquete vggt/
@@ -128,4 +129,7 @@ def extract_information_vx(batch_size=2):
     print("\nExtracción completada con éxito.")
 
 if __name__ == "__main__":
+    t0 = time.perf_counter()
     extract_information_vx(batch_size=50)
+    elapsed = time.perf_counter() - t0
+    print(f"\nTiempo total: {int(elapsed//3600):02d}h {int(elapsed%3600//60):02d}m {elapsed%60:05.2f}s")

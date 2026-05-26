@@ -1,3 +1,4 @@
+import time
 from tqdm import tqdm
 from glob import glob
 from os.path import join, basename
@@ -180,8 +181,11 @@ def poolCreation(root_data_list, root_output, num_process=10):
 
 
 if __name__ == '__main__':
+    t0 = time.perf_counter()
     for d in config.PARTITIONS:
         poolCreation(
             root_data_list=[Path(config.ROOT_DATA1) / d],
             root_output=Path(config.ROOT_POOL_PERSON),
         )
+    elapsed = time.perf_counter() - t0
+    print(f"\nTiempo total: {int(elapsed//3600):02d}h {int(elapsed%3600//60):02d}m {elapsed%60:05.2f}s")
