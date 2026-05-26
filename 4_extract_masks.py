@@ -91,6 +91,77 @@ def extract_mask(crop_orig, det_model, sam_model):
     return mask_binary, stats
 
 
+def compute_completeness(mask_binary, pitch_deg):
+    """
+    Compute body-completeness metrics from a segmentation mask.
+
+    Uses the source capture pitch (from 1_extract_information.py via pool.csv) to
+    apply angle-aware thresholds:
+
+      High oblique  (|pitch| < 35°): horizon visible, full standing body expected.
+        → strict: head AND feet must be clearly present and not truncated,
+          mask bounding box must be tall (aspect ≥ 1.5).
+
+      Low oblique   (35° ≤ |pitch| < 55°): body mostly visible but foreshortened.
+        → moderate thresholds.
+
+      Nadir         (|pitch| ≥ 55°): person appears as a compact blob from above.
+        → relaxed: anatomical top/bottom correspondence breaks down.
+
+    Fields returned (merged into the stats dict):
+      head_coverage  — fraction of top-7% rows occupied by mask pixels.
+                       Low → head truncated at crop top; too high → head hits edge.
+      feet_coverage  — fraction of bottom-7% rows occupied by mask pixels.
+                       Low → feet truncated at crop bottom.
+      mask_aspect    — height / width of mask bounding box.
+                       > 1.5 → tall narrow silhouette (expected for oblique).
+      complete_body  — True if all angle-appropriate criteria pass simultaneously.
+    """
+    h, w   = mask_binary.shape[:2]
+    margin = max(3, int(h * 0.07))
+
+    top_region    = mask_binary[:margin, :]
+    bottom_region = mask_binary[-margin:, :]
+    area = float(w * margin)
+
+    head_cov = float(np.count_nonzero(top_region))    / (area + 1e-6)
+    feet_cov = float(np.count_nonzero(bottom_region)) / (area + 1e-6)
+
+    # Mask bounding-box aspect ratio (height / width of the person silhouette)
+    rows_on = np.any(mask_binary > 127, axis=1)
+    cols_on = np.any(mask_binary > 127, axis=0)
+    if rows_on.any() and cols_on.any():
+        r_lo, r_hi = np.where(rows_on)[0][[0, -1]]
+        c_lo, c_hi = np.where(cols_on)[0][[0, -1]]
+        mask_aspect = float(r_hi - r_lo + 1) / max(1, c_hi - c_lo + 1)
+    else:
+        mask_aspect = 1.0
+
+    abs_p = abs(float(pitch_deg))
+    if abs_p < 35:       # high oblique — horizon visible, full body required
+        min_c, max_c = 0.05, 0.45
+        min_aspect   = 1.5
+    elif abs_p < 55:     # low oblique
+        min_c, max_c = 0.03, 0.55
+        min_aspect   = 1.0
+    else:                # nadir — compact blob, anatomical mapping unreliable
+        min_c, max_c = 0.02, 0.70
+        min_aspect   = 0.5
+
+    complete = bool(
+        min_c < head_cov < max_c and
+        min_c < feet_cov < max_c and
+        mask_aspect >= min_aspect
+    )
+
+    return {
+        'head_coverage': round(head_cov,    4),
+        'feet_coverage': round(feet_cov,    4),
+        'mask_aspect':   round(mask_aspect, 3),
+        'complete_body': complete,
+    }
+
+
 def process_pool():
     print("="*60)
     print("  Pre-segmentación YOLO-det + SAM2 para People Pool")
@@ -122,21 +193,61 @@ def process_pool():
     df_pool = pd.read_csv(str(pool_csv_p))
     print(f"[INFO] Procesando pool ({len(df_pool)} parches)...")
 
-    n_valid = 0
+    # Build pitch lookup: crop_stem → source capture pitch.
+    # 1_extract_information.py writes pitch to camera_data.csv;
+    # 3_people_pool.py merges it into pool.csv — so each crop carries
+    # the exact depression angle at which it was originally captured.
+    pitch_lookup: dict = {}
+    if 'pitch' in df_pool.columns:
+        for _, r in df_pool.iterrows():
+            try:
+                stem = Path(r['name']).stem
+                p    = float(r['pitch'])
+                pitch_lookup[stem] = p if not np.isnan(p) else -45.0
+            except Exception:
+                pass
+    if not pitch_lookup:
+        print("[WARN] No se encontró columna 'pitch' en pool.csv — "
+              "usando -45° por defecto para umbrales de completitud")
+
+    n_valid   = 0
     n_invalid = 0
     n_skipped = 0
+    n_updated = 0   # JSONs existentes actualizados con campos de completitud
 
-    for _, row in tqdm(df_pool.iterrows(), total=len(df_pool), desc="Segmentando"):
-        img_path = Path(row['name'])
-        if not img_path.exists():
-            n_skipped += 1
-            continue
+    _NO_BODY = {'head_coverage': 0.0, 'feet_coverage': 0.0,
+                'mask_aspect': 0.0,   'complete_body': False}
 
+    for _, row in tqdm(df_pool.iterrows(), total=len(df_pool), desc="Segmentando", ncols=100):
+        img_path   = Path(row['name'])
         patch_name = img_path.stem
         mask_path  = masks_dir / f"{patch_name}.png"
         json_path  = meta_dir  / f"{patch_name}.json"
+        pitch_deg  = pitch_lookup.get(patch_name, -45.0)
 
-        if mask_path.exists() and json_path.exists():
+        # ── Case A: JSON already exists ──────────────────────────────────────
+        # Fast path: if completeness fields are missing, compute them from the
+        # already-saved mask without re-running the expensive YOLO+SAM2 pipeline.
+        if json_path.exists():
+            with open(json_path) as f:
+                existing = json.load(f)
+            if 'complete_body' not in existing:
+                if mask_path.exists():
+                    saved_mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+                    existing.update(
+                        compute_completeness(saved_mask, pitch_deg)
+                        if saved_mask is not None else _NO_BODY
+                    )
+                else:
+                    existing.update(_NO_BODY)   # invalid crop — no mask
+                with open(json_path, 'w') as f:
+                    json.dump(existing, f, indent=4)
+                n_updated += 1
+            n_skipped += 1
+            continue
+
+        # ── Case B: full pipeline — YOLO detect → SAM2 segment ───────────────
+        if not img_path.exists():
             n_skipped += 1
             continue
 
@@ -146,6 +257,9 @@ def process_pool():
             continue
 
         mask, stats = extract_mask(img, det_model, sam_model)
+
+        # Angle-aware completeness metrics (uses pitch from 1_extract_information.py)
+        stats.update(compute_completeness(mask, pitch_deg) if mask is not None else _NO_BODY)
 
         with open(json_path, 'w') as f:
             json.dump(stats, f, indent=4)
@@ -157,9 +271,10 @@ def process_pool():
             n_invalid += 1
 
     print(f"\n[SUCCESS] Pre-segmentación completada.")
-    print(f"  Máscaras válidas:   {n_valid}")
-    print(f"  Máscaras inválidas: {n_invalid}")
-    print(f"  Omitidas (ya existían o no encontradas): {n_skipped}")
+    print(f"  Máscaras válidas:                       {n_valid}")
+    print(f"  Máscaras inválidas:                     {n_invalid}")
+    print(f"  JSONs actualizados (+ completeness):    {n_updated}")
+    print(f"  Omitidas (ya al día o no encontradas):  {n_skipped}")
 
 
 if __name__ == '__main__':
