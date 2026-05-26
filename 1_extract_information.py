@@ -25,7 +25,7 @@ except ImportError:
     print("Error: No se encuentran los módulos de VGGT. Ejecuta desde la raíz del proyecto.")
     sys.exit(1)
 
-def extract_information(batch_size=2):
+def extract_information(batch_size=64):
     # 1. Configuración del modelo (se carga una sola vez para todas las particiones)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -137,6 +137,6 @@ def extract_information(batch_size=2):
 
 if __name__ == "__main__":
     t0 = time.perf_counter()
-    extract_information(batch_size=64)
+    extract_information()
     elapsed = time.perf_counter() - t0
     print(f"\nTiempo total: {int(elapsed//3600):02d}h {int(elapsed%3600//60):02d}m {elapsed%60:05.2f}s")
