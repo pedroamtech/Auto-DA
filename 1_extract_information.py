@@ -38,6 +38,13 @@ def extract_information_vx(batch_size=2):
             import logging
             logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 
+    if torch.cuda.is_available():
+        gpu_name  = torch.cuda.get_device_name(0)
+        vram_gb   = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        print(f"[GPU] {gpu_name}  |  VRAM: {vram_gb:.1f} GB  |  CUDA {torch.version.cuda}")
+    else:
+        print("[GPU] CUDA no disponible — se usará CPU (proceso lento)")
+
     print(f"Cargando VGGT en {device}...")
     model = VGGT.from_pretrained("facebook/VGGT-1B", token=hf_token).to(device)
     model.eval()

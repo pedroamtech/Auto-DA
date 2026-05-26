@@ -96,6 +96,13 @@ def process_pool():
     print("  Pre-segmentación YOLO-det + SAM2 para People Pool")
     print("="*60)
 
+    if torch.cuda.is_available():
+        gpu_name  = torch.cuda.get_device_name(0)
+        vram_gb   = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        print(f"[GPU] {gpu_name}  |  VRAM: {vram_gb:.1f} GB  |  CUDA {torch.version.cuda}")
+    else:
+        print("[GPU] CUDA no disponible — se usará CPU (proceso lento)")
+
     print(f"[INFO] Cargando modelo de detección: {DET_MODEL} en {DEVICE}...")
     det_model = YOLO(DET_MODEL)
 
