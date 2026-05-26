@@ -187,5 +187,5 @@ if __name__ == '__main__':
     for d in config.PARTITIONS:
         poolCreation(
             root_data_list=[Path(config.ROOT_DATA1) / d],
-            root_output=Path(config.ROOT_POOL_PERSON) / d,
+            root_output=Path(config.ROOT_POOL_PERSON),
         )
