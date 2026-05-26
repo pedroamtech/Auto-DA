@@ -37,7 +37,6 @@ BORDER_MARGIN        = 20
 ROOT_DATA         = Path(config.ROOT_DATA1)
 ROOT_OUTPUT_AUG   = Path(config.ROOT_OUTPUT_AUG)
 ROOT_POOL_CSV     = Path(config.ROOT_POOL_PERSON)
-ROOT_META_CSV     = Path(config.ROOT_VGGT_METADATA)
 DEPTH_MAPS_SUBDIR = 'depth_maps'
 PARTITIONS        = config.PARTITIONS
 
@@ -155,10 +154,10 @@ def _save_distribution_csv(out_dir, partition, heights):
 def augment_partition(partition: str):
     images_dir = ROOT_DATA / partition / 'images'
     labels_dir = ROOT_DATA / partition / 'labels'
-    pool_dir   = ROOT_POOL_CSV / partition
-    pool_csv_p = pool_dir / 'pool.csv'
-    masks_dir  = pool_dir / 'masks'
-    meta_dir   = pool_dir / 'metadata'
+    pool_csv_p = ROOT_POOL_CSV / 'pool.csv'
+    masks_dir  = ROOT_POOL_CSV / 'masks'
+    meta_dir   = ROOT_POOL_CSV / 'metadata'
+    meta_csv   = ROOT_DATA / partition / DEPTH_MAPS_SUBDIR / 'camera_data.csv'
 
     out_img_dir = ROOT_OUTPUT_AUG / partition / 'images'
     out_lbl_dir = ROOT_OUTPUT_AUG / partition / 'labels'
@@ -168,7 +167,7 @@ def augment_partition(partition: str):
     if not pool_csv_p.exists():
         return
     df_pool    = pd.read_csv(str(pool_csv_p))
-    df_bg_meta = pd.read_csv(ROOT_META_CSV).set_index('image_name')
+    df_bg_meta = pd.read_csv(meta_csv).set_index('image_name')
 
     bg_images = [p for p in glob(str(images_dir / '*.jpg'))
                  if not os.path.basename(p).startswith('depth_')]
@@ -193,7 +192,7 @@ def augment_partition(partition: str):
         for d_name in [f"depth_{bg_name}",
                        f"depth_{os.path.splitext(bg_name)[0]}.jpg",
                        f"depth_{os.path.splitext(bg_name)[0]}.png"]:
-            path = images_dir / DEPTH_MAPS_SUBDIR / d_name
+            path = ROOT_DATA / partition / DEPTH_MAPS_SUBDIR / d_name
             if path.exists():
                 raw = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
                 if raw is not None:
