@@ -80,58 +80,58 @@ def extract_information(batch_size=32):
 
         # 3. Procesamiento por batches
         n_batches = len(range(0, len(image_files), batch_size))
-        with tqdm(total=n_batches, desc=f"[{partition}] Extrayendo", unit="batch", ncols=100) as pbar:
-            for i in range(0, len(image_files), batch_size):
-                batch_files = image_files[i : i + batch_size]
-                images_tensor = load_and_preprocess_images(batch_files).to(device)
+        for batch_num, i in enumerate(range(0, len(image_files), batch_size), 1):
+            batch_files = image_files[i : i + batch_size]
+            images_tensor = load_and_preprocess_images(batch_files).to(device)
 
-                with torch.inference_mode():
-                    predictions = model(images_tensor.unsqueeze(0))
-                    pose_enc   = predictions["pose_enc"]
-                    depth_data = predictions["depth"].squeeze(0).float().cpu().numpy()
+            with torch.inference_mode():
+                predictions = model(images_tensor.unsqueeze(0))
+                pose_enc   = predictions["pose_enc"]
+                depth_data = predictions["depth"].squeeze(0).float().cpu().numpy()
 
-                extrinsics, intrinsics = pose_encoding_to_extri_intri(pose_enc, images_tensor.shape[-2:])
-                extrinsics = extrinsics.squeeze(0).float().cpu().numpy()
-                intrinsics = intrinsics.squeeze(0).float().cpu().numpy()
+            extrinsics, intrinsics = pose_encoding_to_extri_intri(pose_enc, images_tensor.shape[-2:])
+            extrinsics = extrinsics.squeeze(0).float().cpu().numpy()
+            intrinsics = intrinsics.squeeze(0).float().cpu().numpy()
 
-                for j, img_path in enumerate(batch_files):
-                    # A. Guardar mapa de profundidad (escala de grises 8-bit)
-                    d_map = depth_data[j, :, :, 0]
-                    d_min, d_max = d_map.min(), d_map.max()
-                    norm_d = (d_map - d_min) / (d_max - d_min + 1e-8)
-                    depth_gray = (norm_d * 255).astype(np.uint8)
-                    depth_name = f"depth_{os.path.basename(img_path)}"
-                    Image.fromarray(depth_gray).save(depth_dir / depth_name)
+            for j, img_path in tqdm(enumerate(batch_files), total=len(batch_files),
+                                     desc=f"[{partition}] Batch {batch_num}/{n_batches}",
+                                     unit="img", ncols=100):
+                # A. Guardar mapa de profundidad (escala de grises 8-bit)
+                d_map = depth_data[j, :, :, 0]
+                d_min, d_max = d_map.min(), d_map.max()
+                norm_d = (d_map - d_min) / (d_max - d_min + 1e-8)
+                depth_gray = (norm_d * 255).astype(np.uint8)
+                depth_name = f"depth_{os.path.basename(img_path)}"
+                Image.fromarray(depth_gray).save(depth_dir / depth_name)
 
-                    # B. Pose (Mundo <- Cámara)
-                    R, t = extrinsics[j][:3, :3], extrinsics[j][:3, 3]
-                    C_world = -np.dot(R.T, t)
-                    height_rel = abs(C_world[2])
+                # B. Pose (Mundo <- Cámara)
+                R, t = extrinsics[j][:3, :3], extrinsics[j][:3, 3]
+                C_world = -np.dot(R.T, t)
+                height_rel = abs(C_world[2])
 
-                    # C. Ángulo de inclinación (Pitch)
-                    pitch_rad = np.arcsin(np.clip(R[:, 2][2], -1.0, 1.0))
-                    pitch_deg = np.degrees(pitch_rad)
+                # C. Ángulo de inclinación (Pitch)
+                pitch_rad = np.arcsin(np.clip(R[:, 2][2], -1.0, 1.0))
+                pitch_deg = np.degrees(pitch_rad)
 
-                    data_records.append({
-                        "image_name":     os.path.basename(img_path),
-                        "depth_map_path": depth_name,
-                        "depth_min":      d_min,
-                        "depth_max":      d_max,
-                        "focal_x":        intrinsics[j][0, 0],
-                        "focal_y":        intrinsics[j][1, 1],
-                        "principal_x":    intrinsics[j][0, 2],
-                        "principal_y":    intrinsics[j][1, 2],
-                        "pos_x":          C_world[0],
-                        "pos_y":          C_world[1],
-                        "pos_z":          C_world[2],
-                        "height":         height_rel,
-                        "pitch":          pitch_deg,
-                        "R_world_flat":   R.T.flatten().tolist()
-                    })
+                data_records.append({
+                    "image_name":     os.path.basename(img_path),
+                    "depth_map_path": depth_name,
+                    "depth_min":      d_min,
+                    "depth_max":      d_max,
+                    "focal_x":        intrinsics[j][0, 0],
+                    "focal_y":        intrinsics[j][1, 1],
+                    "principal_x":    intrinsics[j][0, 2],
+                    "principal_y":    intrinsics[j][1, 2],
+                    "pos_x":          C_world[0],
+                    "pos_y":          C_world[1],
+                    "pos_z":          C_world[2],
+                    "height":         height_rel,
+                    "pitch":          pitch_deg,
+                    "R_world_flat":   R.T.flatten().tolist()
+                })
 
-                del images_tensor, predictions, pose_enc, depth_data
-                torch.cuda.empty_cache()
-                pbar.update(1)
+            del images_tensor, predictions, pose_enc, depth_data
+            torch.cuda.empty_cache()
 
         pd.DataFrame(data_records).to_csv(csv_path, index=False)
         print(f"[{partition}] CSV guardado en: {csv_path}")
