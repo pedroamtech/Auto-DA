@@ -16,7 +16,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-import matplotlib.colors as mcolors
+
 from matplotlib.lines import Line2D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from sklearn.cluster import KMeans
@@ -117,29 +117,14 @@ def view_cluster():
     ax_focal  = fig.add_subplot(gs[2, 1])
     ax_table  = fig.add_subplot(gs[:, 2])
 
-    cmap_cl    = plt.get_cmap('tab20')
-    cmap_pitch = plt.get_cmap('RdYlBu_r')          # azul=nadir · rojo=oblicuo
-    norm_p     = mcolors.Normalize(vmin=df['pitch'].min(), vmax=df['pitch'].max())
-    cl_colors  = [cmap_cl(c % 20) for c in range(n_clusters)]
+    cmap_cl   = plt.get_cmap('tab10')
+    cl_colors = [cmap_cl(c % 10) for c in range(n_clusters)]
 
-    # ── Scatter: todas las cámaras, color = pitch ─────────────────────────────
-    pos_raw  = df[['pos_x', 'pos_y', 'pos_z']].values
-    pos_plot = _to_plot(pos_raw)
-
-    sc = ax3d.scatter(
-        pos_plot[:, 0], pos_plot[:, 1], pos_plot[:, 2],
-        c=df['pitch'].values, cmap=cmap_pitch, norm=norm_p,
-        s=20, alpha=0.55, depthshade=True, zorder=3
-    )
-    sm = plt.cm.ScalarMappable(cmap=cmap_pitch, norm=norm_p)
-    sm.set_array([])
-    fig.colorbar(sm, ax=ax3d, shrink=0.45, pad=0.1,
-                 label='Pitch (°)', orientation='vertical')
-
-    # ── Frustums: representante de cada cluster ────────────────────────────────
+    # ── Solo frustums: un cono por cluster ────────────────────────────────────
+    pos_raw     = df[['pos_x', 'pos_y', 'pos_z']].values
     mean_h      = float(df['height'].mean()) or 1.0
     scene_span  = float(np.max(np.ptp(pos_raw, axis=0))) or 1.0
-    all_plot_v  = [pos_plot]
+    all_plot_v  = []
     legend_elems = []
 
     for cid in range(n_clusters):
@@ -175,28 +160,23 @@ def view_cluster():
             [v[1], v[2], v[3], v[4]],
         ]
         ax3d.add_collection3d(Poly3DCollection(
-            faces, facecolors=color, alpha=0.45, edgecolors='k', linewidths=0.6
+            faces, facecolors=color, alpha=0.55, edgecolors='k', linewidths=0.8
         ))
 
-        # Flecha de dirección óptica
-        pp       = _to_plot(pos)
-        dir_cam  = R_wc @ np.array([0, 0, 1])
-        dir_plot = np.array([dir_cam[0], -dir_cam[1], -dir_cam[2]])
-        ax3d.quiver(*pp, *dir_plot, length=scale * 2.0,
-                    color=color, linewidth=2.5, arrow_length_ratio=0.2)
-
-        # Etiqueta con parámetros clave
+        # Etiqueta junto al apex: grupo + pitch + altura
+        pp = _to_plot(pos)
         ax3d.text(
-            pp[0], pp[1], pp[2] + scale * 1.2,
-            f"G{cid}  p={rep['pitch']:.0f}°\nh={h_rel:.1f}  f={fy:.0f}",
-            fontsize=7.5, fontweight='bold',
-            bbox=dict(facecolor='white', alpha=0.65, edgecolor=color, pad=2)
+            pp[0], pp[1], pp[2] + scale * 0.25,
+            f"G{cid}\npitch {rep['pitch']:.0f}°\naltura {h_rel:.1f}",
+            fontsize=8, fontweight='bold', ha='center',
+            bbox=dict(facecolor='white', alpha=0.75, edgecolor=color,
+                      boxstyle='round,pad=0.3')
         )
 
         legend_elems.append(Line2D(
             [0], [0], marker='s', color='w',
-            label=f'G{cid}  (n={len(sub)})',
-            markerfacecolor=color, markersize=9
+            label=f'Grupo {cid}  —  {len(sub)} imágenes  |  pitch {sub["pitch"].mean():.0f}°',
+            markerfacecolor=color, markersize=10
         ))
 
     # Ajuste de límites 3D
@@ -210,12 +190,13 @@ def view_cluster():
     ax3d.set_ylabel('−Y (Norte)',  fontsize=9)
     ax3d.set_zlabel('Z (Altura)',  fontsize=9)
     ax3d.set_title(
-        f'{n_clusters} Clusters  ·  {len(df)} cámaras\n'
-        'Puntos: todas (color = pitch)  ·  Pirámides: representante por cluster',
+        f'Posiciones y ángulo de visión — {n_clusters} grupos ({len(df)} imágenes)\n'
+        'Cada cono representa el campo visual (FOV) de un grupo de cámaras',
         fontsize=10
     )
-    ax3d.legend(handles=legend_elems, title='Clusters',
-                loc='upper left', fontsize=7.5, title_fontsize=8.5)
+    ax3d.legend(handles=legend_elems, title='Grupos de cámara',
+                loc='upper left', fontsize=8, title_fontsize=9,
+                framealpha=0.85)
 
     # ── Violines de distribución ───────────────────────────────────────────────
     grp_pitch  = [df[df['cluster'] == c]['pitch'].values   for c in range(n_clusters)]
