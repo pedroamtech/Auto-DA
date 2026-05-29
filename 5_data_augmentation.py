@@ -43,6 +43,13 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent / 'people_pool'))
 import config
 
+try:
+    from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
+    import torch as _torch
+    SEGFORMER_AVAILABLE = True
+except ImportError:
+    SEGFORMER_AVAILABLE = False
+
 # ─── Configuration ────────────────────────────────────────────────────────────
 NUM_PEOPLE_PER_IMAGE = getattr(config, 'NUM_PEOPLE_X_IMG', 15)
 HEIGHT_AUG_LOW       = getattr(config, 'HEIGHT_AUG_LOW', 5)
@@ -73,9 +80,52 @@ ROOT_POOL_CSV   = Path(config.ROOT_POOL_PERSON)
 DEPTH_SUBDIR    = 'depth_maps'
 PARTITIONS      = config.PARTITIONS
 
+import torch as _torch_check
+DEVICE = 'cuda:0' if _torch_check.cuda.is_available() else 'cpu'
+
 SIZE_BINS_PX   = [(10, 25), (25, 45), (45, 70), (70, 104)]
 TARGET_PER_BIN = max(1, NUM_PEOPLE_PER_IMAGE // len(SIZE_BINS_PX))
 MAX_ATTEMPTS   = 30
+
+# ── Segmentación semántica (SegFormer-B2 ADE20K) ──────────────────────────────
+SEGFORMER_MODEL  = 'nvidia/segformer-b2-finetuned-ade-512-512'
+SEG_DILATION_PX  = 20
+# Clases ADE20K prohibidas para colocación de personas en imágenes de dron
+FORBIDDEN_ADE20K = {
+    1,   # building/edifice
+    2,   # sky
+    4,   # tree
+    17,  # plant
+    20,  # car
+    21,  # water
+    26,  # sea
+    32,  # fence
+    34,  # rock/stone
+    38,  # railing
+    42,  # column/pillar
+    48,  # skyscraper
+    53,  # stairs
+    61,  # bridge
+    68,  # hill
+    72,  # palm
+    80,  # bus
+    83,  # truck
+    84,  # tower
+    93,  # pole
+    102, # van
+    109, # swimming pool
+    140, # pier
+}
+
+# ── Distribución espacial en cuadrícula ───────────────────────────────────────
+SPATIAL_GRID   = (3, 3)    # cuadrícula 3×3 para distribución uniforme
+N_CANDIDATES   = 300       # puntos candidatos a evaluar por celda
+
+# ── Filtro anti-pixelación (SSIM) ─────────────────────────────────────────────
+MIN_SSIM       = 0.55      # parches con SSIM simulado < umbral se rechazan
+
+# ── Compatibilidad de tamaño con personas nativas ─────────────────────────────
+NATIVE_MARGIN  = 1.8       # factor máximo sobre p90 nativo permitido
 
 
 def safe_float(val, default=1000.0):
@@ -299,6 +349,68 @@ def init_placed_from_labels(original_labels, img_w, img_h):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# BLOCK 4.5 — SEMANTIC PLACEMENT MASK (SegFormer)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def load_segformer():
+    """
+    Carga SegFormer-B2 (ADE20K) una sola vez.
+    Retorna (processor, model) o (None, None) si transformers no está instalado.
+    """
+    if not SEGFORMER_AVAILABLE:
+        print('\n[WARN] SegFormer desactivado — transformers no instalado.')
+        print('       Instalar: pip install transformers')
+        print('       Fallback activo: detección de suelo por mapa de profundidad.\n')
+        return None, None
+    try:
+        processor = SegformerImageProcessor.from_pretrained(SEGFORMER_MODEL)
+        model     = SegformerForSemanticSegmentation.from_pretrained(SEGFORMER_MODEL)
+        model     = model.to(DEVICE).eval()
+        print(f'[INFO] SegFormer-B2 (ADE20K) listo en {DEVICE} — máscara semántica activada')
+        return processor, model
+    except Exception as e:
+        print(f'[WARN] No se pudo cargar SegFormer: {e}')
+        print('       Fallback activo: detección de suelo por mapa de profundidad.')
+        return None, None
+
+
+def get_semantic_forbidden_mask(bg_img, seg_processor, seg_model):
+    """
+    Ejecuta SegFormer sobre la imagen de fondo y devuelve una máscara uint8
+    donde 255 = zona prohibida (árboles, edificios, vehículos, agua, etc.).
+    Retorna None si SegFormer no está disponible.
+    """
+    if seg_processor is None or seg_model is None:
+        return None
+    try:
+        bg_h, bg_w = bg_img.shape[:2]
+        bg_rgb     = cv2.cvtColor(bg_img, cv2.COLOR_BGR2RGB)
+
+        inputs = seg_processor(images=bg_rgb, return_tensors='pt')
+        # Mover cada tensor al device explícitamente (evita fallo en BatchFeature.to())
+        inputs = {k: v.to(DEVICE) if hasattr(v, 'to') else v for k, v in inputs.items()}
+
+        with _torch.no_grad():
+            logits = seg_model(**inputs).logits      # (1, 150, H/4, W/4)
+
+        seg_map = _torch.nn.functional.interpolate(
+            logits, size=(bg_h, bg_w), mode='bilinear', align_corners=False
+        ).argmax(dim=1).squeeze().cpu().numpy().astype(np.int16)
+
+        forbidden = np.zeros((bg_h, bg_w), dtype=np.uint8)
+        for cls_id in FORBIDDEN_ADE20K:
+            forbidden[seg_map == cls_id] = 255
+
+        if SEG_DILATION_PX > 0:
+            k         = np.ones((SEG_DILATION_PX, SEG_DILATION_PX), np.uint8)
+            forbidden = cv2.dilate(forbidden, k, iterations=1)
+
+        return forbidden
+    except Exception as e:
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # BLOCK 5 — PLACEMENT MASK
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -414,50 +526,96 @@ def _min_exclusion_from_pitch(pitch_deg, bg_h):
     return int(bg_h * sky_frac)
 
 
-def make_placement_mask(bg_img, d_map, walkable_pts, pitch_deg, fy, cy_principal):
-    hsv          = cv2.cvtColor(bg_img, cv2.COLOR_BGR2HSV)
-    bg_h, bg_w   = bg_img.shape[:2]
-    mu, std      = _road_color_stats(bg_img, walkable_pts)
+def _depth_ground_mask(d_map_r, refs, bg_h, bg_w):
+    """
+    Detecta píxeles a nivel de suelo usando el mapa de profundidad VGGT.
 
-    lo = np.clip(mu - std * 2.5, 0, 255).astype(np.uint8)
-    hi = np.clip(mu + std * 2.5, 0, 255).astype(np.uint8)
-    if std[1] < 40 or mu[1] < 40:
-        lo[0] = 0; hi[0] = 179
-        # Cap Value upper bound so bright sky pixels (V >> pavement V) are rejected
-        # by the color filter even in hazy/low-contrast scenes.
-        hi[2] = min(int(hi[2]), int(np.clip(mu[2] + std[2] * 1.8, 0, 255)))
+    Principio físico para imágenes de dron:
+      - Suelo (calle, plaza) = MAYOR profundidad (más lejos del dron)
+      - Techos, copas de árboles, techos de vehículos = MENOR profundidad (más cerca)
 
-    color_mask = cv2.inRange(hsv, lo, hi)
-    invalid    = np.zeros((bg_h, bg_w), dtype=np.uint8)
+    Estrategia: estimar la profundidad mínima del suelo usando las personas
+    ya anotadas como anclajes. Rechazar todo lo que sea significativamente
+    más cercano al dron que ese nivel.
 
-    # Sky: adaptive depth + color (replaces the fragile fixed 0.98 threshold)
-    invalid = cv2.bitwise_or(invalid,
-                              _sky_exclusion_mask(d_map, hsv, bg_h, bg_w, pitch_deg))
+    Sin referencias: estima la profundidad del suelo desde la zona inferior
+    de la imagen (que en vistas de dron suele ser suelo).
+    """
+    # Estimar profundidad mínima del plano de suelo
+    if refs:
+        valid_depths = [r['d'] for r in refs if r['d'] > 0]
+    else:
+        valid_depths = []
 
-    # Vegetation
-    green = cv2.inRange(hsv, np.array([30,40,40]), np.array([90,255,255]))
-    invalid = cv2.bitwise_or(invalid, cv2.dilate(green, np.ones((9,9),np.uint8), iterations=2))
+    if valid_depths:
+        # p10 de las profundidades de referencia × margen de seguridad
+        d_min_ground = float(np.percentile(valid_depths, 10)) * 0.55
+    else:
+        # Sin referencias: usar cuarto inferior de la imagen como proxy del suelo
+        r0 = int(bg_h * 0.60); r1 = int(bg_h * 0.92)
+        c0 = int(bg_w * 0.10); c1 = int(bg_w * 0.90)
+        region = d_map_r[r0:r1, c0:c1]
+        if region.size == 0:
+            return np.ones((bg_h, bg_w), dtype=np.uint8) * 255
+        d_min_ground = float(np.percentile(region, 15)) * 0.50
 
-    # Depth discontinuities (object boundaries, elevated surfaces)
-    edges = cv2.Canny((d_map*255).astype(np.uint8), 15, 60)
-    invalid = cv2.bitwise_or(invalid, cv2.dilate(edges, np.ones((11,11),np.uint8), iterations=2))
+    if d_min_ground <= 0:
+        return np.ones((bg_h, bg_w), dtype=np.uint8) * 255
 
-    mask = cv2.bitwise_and(color_mask, cv2.bitwise_not(invalid))
-    mask[:BORDER_MARGIN, :] = mask[-BORDER_MARGIN:, :] = 0
-    mask[:, :BORDER_MARGIN] = mask[:, -BORDER_MARGIN:] = 0
+    # Aceptar solo píxeles ≥ d_min_ground (a nivel de suelo o más profundo)
+    valid = (d_map_r >= d_min_ground).astype(np.uint8) * 255
 
-    # ── Horizon exclusion: maximum of three independent estimates ──────────
-    # Each method can fail independently; the maximum is always conservative.
-    yh_geom    = horizon_row(fy, cy_principal, pitch_deg, bg_h)   # camera geometry
-    yh_depth   = _horizon_from_depth(d_map, bg_h)                 # depth-map gradient
-    yh_physics = _min_exclusion_from_pitch(pitch_deg, bg_h)       # physical lower bound
+    # Limpieza morfológica: cerrar huecos pequeños, eliminar ruido
+    valid = cv2.morphologyEx(valid, cv2.MORPH_CLOSE, np.ones((31, 31), np.uint8))
+    valid = cv2.morphologyEx(valid, cv2.MORPH_OPEN,  np.ones((13, 13), np.uint8))
+    return valid
 
-    yh_final = max(
-        yh_geom  if yh_geom >= 0 else 0,
-        yh_depth,
-        yh_physics,       # guarantees safety even when geometry/depth detection fails
-    )
-    cutoff = int(min(bg_h - 1, yh_final + bg_h * 0.04))  # +4% overlap buffer
+
+def make_placement_mask(bg_img, d_map, d_map_r, refs, walkable_pts,
+                         pitch_deg, fy, cy_principal, seg_forbidden=None):
+    """
+    Construye la máscara de zonas válidas para insertar personas.
+
+    Capas de filtrado (orden de aplicación):
+      1. Detección de nivel de suelo por profundidad  (siempre activa)
+         → rechaza techos, copas de árboles, techos de vehículos
+      2. SegFormer semántico                          (si disponible)
+         → rechaza clases prohibidas: árbol, edificio, auto, agua, etc.
+      3. Exclusión de cielo (profundidad + color)
+      4. Vegetación densa (HSV verde)
+      5. Márgenes de borde
+      6. Exclusión de horizonte
+    """
+    bg_h, bg_w = bg_img.shape[:2]
+    hsv        = cv2.cvtColor(bg_img, cv2.COLOR_BGR2HSV)
+
+    # ── Capa 1: nivel de suelo por profundidad (siempre) ─────────────────────
+    mask = _depth_ground_mask(d_map_r, refs, bg_h, bg_w)
+
+    # ── Capa 2: semántica SegFormer (si disponible) ───────────────────────────
+    if seg_forbidden is not None:
+        mask[seg_forbidden > 0] = 0
+
+    # ── Capa 3: exclusión de cielo ────────────────────────────────────────────
+    sky = _sky_exclusion_mask(d_map, hsv, bg_h, bg_w, pitch_deg)
+    mask[sky > 0] = 0
+
+    # ── Capa 4: vegetación densa (HSV verde) ──────────────────────────────────
+    green = cv2.inRange(hsv, np.array([30, 40, 40]), np.array([90, 255, 255]))
+    mask[cv2.dilate(green, np.ones((15, 15), np.uint8), iterations=2) > 0] = 0
+
+    # ── Capa 5: márgenes de borde ─────────────────────────────────────────────
+    mask[:BORDER_MARGIN,  :]  = 0
+    mask[-BORDER_MARGIN:, :]  = 0
+    mask[:,  :BORDER_MARGIN]  = 0
+    mask[:, -BORDER_MARGIN:]  = 0
+
+    # ── Capa 6: horizonte (máximo de tres estimaciones independientes) ────────
+    yh_geom    = horizon_row(fy, cy_principal, pitch_deg, bg_h)
+    yh_depth   = _horizon_from_depth(d_map, bg_h)
+    yh_physics = _min_exclusion_from_pitch(pitch_deg, bg_h)
+    yh_final   = max(yh_geom if yh_geom >= 0 else 0, yh_depth, yh_physics)
+    cutoff     = int(min(bg_h - 1, yh_final + bg_h * 0.04))
     mask[:cutoff, :] = 0
 
     return mask
@@ -537,6 +695,86 @@ def paste_crop(canvas, crop, mask_gray, x1, y1, nw, nh):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# BLOCK 7.5 — HELPERS: NATIVE SIZE STATS · BALANCED PLACEMENT · SSIM QC
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def compute_native_size_stats(original_labels, img_h):
+    """
+    Extrae la distribución de alturas de personas ya anotadas en la imagen.
+    Retorna dict con p10, p90, mean, o None si no hay personas.
+    Se usa para limitar los bins activos y evitar insertar personas de tamaño
+    inconsistente con la perspectiva real de la imagen destino.
+    """
+    heights = [
+        float(l.split()[4]) * img_h
+        for l in original_labels
+        if l.split() and l.split()[0] == '0' and float(l.split()[4]) * img_h >= 5
+    ]
+    if not heights:
+        return None
+    return {
+        'p10':  float(np.percentile(heights, 10)),
+        'p90':  float(np.percentile(heights, 90)),
+        'mean': float(np.mean(heights)),
+    }
+
+
+def pick_placement_balanced(valid_y, valid_x, bg_h, bg_w, placed_feet):
+    """
+    Selecciona un punto de colocación favoreciendo celdas de la cuadrícula
+    SPATIAL_GRID con menor densidad de personas ya colocadas.
+    Garantiza distribución espacial uniforme en toda la imagen.
+    """
+    n = len(valid_x)
+    if n == 0:
+        return None, None
+
+    rows, cols  = SPATIAL_GRID
+    cell_counts = np.zeros((rows, cols), dtype=int)
+    for px, py, _, _ in placed_feet:
+        r = min(int(py / bg_h * rows), rows - 1)
+        c = min(int(px / bg_w * cols), cols - 1)
+        cell_counts[r, c] += 1
+
+    min_count = int(cell_counts.min())
+    indices   = random.sample(range(n), min(N_CANDIDATES, n))
+    for i in indices:
+        cx, cy = int(valid_x[i]), int(valid_y[i])
+        r = min(int(cy / bg_h * rows), rows - 1)
+        c = min(int(cx / bg_w * cols), cols - 1)
+        if cell_counts[r, c] <= min_count + 1:
+            return cx, cy
+
+    # Fallback: punto aleatorio
+    i = random.randint(0, n - 1)
+    return int(valid_x[i]), int(valid_y[i])
+
+
+def is_patch_quality_ok(crop_resized, scale_factor):
+    """
+    QC-7: Filtro anti-pixelación para parches upscaleados.
+    Simula upscale→downscale y mide pérdida de información (pseudo-SSIM).
+    Solo actúa cuando scale_factor > 1.2; downscale siempre pasa.
+    """
+    if scale_factor <= 1.2:
+        return True
+    h, w = crop_resized.shape[:2]
+    if h < 4 or w < 4:
+        return False
+
+    small = cv2.resize(crop_resized, (max(2, w // 2), max(2, h // 2)),
+                       interpolation=cv2.INTER_AREA)
+    back  = cv2.resize(small, (w, h), interpolation=cv2.INTER_CUBIC)
+
+    g_orig = cv2.cvtColor(crop_resized, cv2.COLOR_BGR2GRAY).astype(float)
+    g_back = cv2.cvtColor(back,         cv2.COLOR_BGR2GRAY).astype(float)
+    std_o  = g_orig.std() + 1e-6
+    std_b  = g_back.std() + 1e-6
+    ssim   = float(np.mean((g_orig - g_orig.mean()) * (g_back - g_back.mean()))) / (std_o * std_b)
+    return ssim >= MIN_SSIM
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # BLOCK 8 — MAIN AUGMENTATION LOOP
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -566,10 +804,14 @@ def augment_partition(partition: str):
         if not os.path.basename(p).startswith('depth_')
     )
 
+    # ── Cargar SegFormer una sola vez por partición ────────────────────────
+    seg_processor, seg_model = load_segformer()
+
     # Per-partition statistics
     n_placed   = 0; n_skipped_img = 0
     stat_knn   = 0; stat_model    = 0; stat_fb    = 0
     stat_qc1   = 0; stat_qc3      = 0; stat_flat  = 0; stat_qc6b = 0
+    stat_qc7   = 0  # pixelation rejections
     partition_heights = []
 
     print(f'\n[{partition}] {len(bg_images)} images | pool: {len(df_pool)} crops')
@@ -632,18 +874,24 @@ def augment_partition(partition: str):
                         (float(p[1]) * bg_w, (float(p[2]) + float(p[4]) / 2) * bg_h)
                     )
 
+        # ── Referencias de personas anotadas (necesario para nivel de suelo) ─
+        # Se calcula ANTES de make_placement_mask para que _depth_ground_mask
+        # pueda usar las profundidades de pies reales como ancla del plano de suelo.
+        refs = parse_reference_persons(lbl_path, d_map, d_map_r, bg_w, bg_h)
+
+        # ── Máscara semántica (SegFormer) — una vez por imagen ────────────
+        seg_forbidden = get_semantic_forbidden_mask(bg_img, seg_processor, seg_model)
+
         # ── Placement mask ─────────────────────────────────────────────────
-        valid_mask = make_placement_mask(bg_img, d_map, walkable_pts,
-                                         bg_pitch, fy, cy_principal)
+        valid_mask = make_placement_mask(bg_img, d_map, d_map_r, refs,
+                                         walkable_pts, bg_pitch, fy, cy_principal,
+                                         seg_forbidden=seg_forbidden)
         valid_y, valid_x = np.where(valid_mask == 255)
         if len(valid_x) < 100:
             n_skipped_img += 1
             continue
 
-        # ── Scale calibration (three-tier hierarchy) ───────────────────────
-        # Tier 1: k-NN depth-ratio from labeled persons (most direct, QC-2)
-        refs = parse_reference_persons(lbl_path, d_map, d_map_r, bg_w, bg_h)
-
+        # ── Scale calibration (two remaining tiers) ────────────────────────
         # Tier 2: global power-law model per image
         calibration = build_calibration(lbl_path, d_map, d_map_r, bg_w, bg_h)
 
@@ -677,17 +925,31 @@ def augment_partition(partition: str):
         # QC-5: track how many times each crop file has been used this image
         crop_usage: dict = {}
 
+        # ── Bins activos según tamaño nativo de personas en la imagen ─────
+        # Evita insertar personas cuyo tamaño rompería la coherencia de escala.
+        native_stats = compute_native_size_stats(original_labels, bg_h)
+        if native_stats:
+            h_max = native_stats['p90'] * NATIVE_MARGIN
+            active_bins = [(lo, hi) for lo, hi in SIZE_BINS_PX if lo < h_max]
+            if not active_bins:
+                active_bins = [SIZE_BINS_PX[0]]
+        else:
+            active_bins = SIZE_BINS_PX
+
         # ── Stratified placement ───────────────────────────────────────────
-        for bin_lo, bin_hi in SIZE_BINS_PX:
+        for bin_lo, bin_hi in active_bins:
             placed_in_bin = 0
             attempts      = 0
 
             while placed_in_bin < TARGET_PER_BIN and attempts < MAX_ATTEMPTS * TARGET_PER_BIN:
                 attempts += 1
 
-                idx      = random.randint(0, len(valid_x) - 1)
-                x_feet   = int(valid_x[idx])
-                y_feet   = int(valid_y[idx])
+                # Punto balanceado: favorece celdas con menos personas
+                x_feet, y_feet = pick_placement_balanced(
+                    valid_y, valid_x, bg_h, bg_w, placed_feet)
+                if x_feet is None:
+                    break
+
                 d_feet   = float(d_map[y_feet, x_feet])    # normalizado — umbral
                 d_feet_r = float(d_map_r[y_feet, x_feet])  # escala VGGT — ratios
 
@@ -805,6 +1067,11 @@ def augment_partition(partition: str):
                 crop   = cv2.resize(crop_orig, (nw, nh), interpolation=interp)
                 mask_r = cv2.resize(mask_orig, (nw, nh), interpolation=cv2.INTER_NEAREST)
 
+                # QC-7: Anti-pixelación — rechaza parches borrosos tras upscale
+                if not is_patch_quality_ok(crop, scale):
+                    stat_qc7 += 1
+                    continue
+
                 try:
                     paste_crop(result_img, crop, mask_r, x1, y1, nw, nh)
                 except Exception:
@@ -831,10 +1098,12 @@ def augment_partition(partition: str):
             f.write('\n'.join(aug_labels))
 
     # ── Partition summary ─────────────────────────────────────────────────
+    sem_mode = 'SegFormer' if seg_model is not None else 'HSV heuristic'
     print(f'\n[{partition}] Placed: {n_placed} | Images skipped: {n_skipped_img}')
-    print(f'  Scale method — kNN-depth: {stat_knn} | power-law: {stat_model} | fallback: {stat_fb}')
-    print(f'  Rejected — QC-1 (resolution): {stat_qc1} | QC-3 (spacing): {stat_qc3} | '
-          f'QC-4 (flat-ground): {stat_flat} | QC-6b (incomplete body): {stat_qc6b}')
+    print(f'  Placement mask: {sem_mode}')
+    print(f'  Scale method  — kNN-depth: {stat_knn} | power-law: {stat_model} | fallback: {stat_fb}')
+    print(f'  Rejected      — QC-1 (resolution): {stat_qc1} | QC-3 (spacing): {stat_qc3} | '
+          f'QC-4 (flat-ground): {stat_flat} | QC-6b (body): {stat_qc6b} | QC-7 (SSIM): {stat_qc7}')
     _print_distribution(partition, partition_heights)
     _save_distribution(ROOT_OUTPUT_AUG / partition, partition, partition_heights)
 
@@ -863,7 +1132,9 @@ if __name__ == '__main__':
     print('  Data Augmentation V2 — Geometrically-Consistent Placement')
     print(f'  Bins: {SIZE_BINS_PX}  |  Target/bin: {TARGET_PER_BIN}')
     print(f'  Partitions: {PARTITIONS}')
-    print(f'  QC-1 max_upscale={MAX_UPSCALE}x  |  QC-3 max_iou={MAX_IOU_OVERLAP}  |  QC-5 max_repeats={MAX_CROP_REPEATS}')
+    print(f'  Semantic mask: {"SegFormer-B2 (ADE20K)" if SEGFORMER_AVAILABLE else "HSV fallback (pip install transformers)"}')
+    print(f'  Spatial grid: {SPATIAL_GRID}  |  Native size margin: {NATIVE_MARGIN}x')
+    print(f'  QC-1 max_upscale={MAX_UPSCALE}x  |  QC-3 max_iou={MAX_IOU_OVERLAP}  |  QC-5 max_repeats={MAX_CROP_REPEATS}  |  QC-7 min_ssim={MIN_SSIM}')
     print('=' * 60)
     t0 = time.perf_counter()
     for p in PARTITIONS:
