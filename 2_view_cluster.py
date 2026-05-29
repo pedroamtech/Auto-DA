@@ -20,20 +20,27 @@ import matplotlib.gridspec as gridspec
 from matplotlib.lines import Line2D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
-from tkinter import filedialog, Tk, simpledialog
+from tkinter import filedialog, Tk
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _ask_clusters():
-    root = Tk(); root.withdraw(); root.attributes('-topmost', True)
-    n = simpledialog.askinteger(
-        "Clusters", "Número de clusters:",
-        parent=root, minvalue=1, maxvalue=50, initialvalue=5
-    )
-    root.destroy()
-    return n or 5
+def _optimal_clusters(scaled, max_k=10):
+    """Elige el k óptimo maximizando el Silhouette Score (k=2..max_k)."""
+    n      = len(scaled)
+    max_k  = min(max_k, n - 1)
+    if max_k < 2:
+        return 1
+    best_k, best_score = 2, -1.0
+    for k in range(2, max_k + 1):
+        labels = KMeans(n_clusters=k, n_init=5, random_state=42).fit_predict(scaled)
+        score  = silhouette_score(scaled, labels)
+        if score > best_score:
+            best_score, best_k = score, k
+    print(f'[AUTO-CLUSTER] k={best_k}  (silhouette={best_score:.3f})')
+    return best_k
 
 
 def _to_plot(pts):
@@ -96,13 +103,12 @@ def view_cluster():
     if not csv_path:
         return
 
-    n_clusters = _ask_clusters()
-
     df = pd.read_csv(csv_path)
 
     # ── Clustering por posición y altura ──────────────────────────────────────
-    scaler = StandardScaler()
-    scaled = scaler.fit_transform(df[['pos_x', 'pos_y', 'height']].values)
+    scaler     = StandardScaler()
+    scaled     = scaler.fit_transform(df[['pos_x', 'pos_y', 'height']].values)
+    n_clusters = _optimal_clusters(scaled)
     df['cluster'] = KMeans(n_clusters=n_clusters, n_init=10,
                            random_state=42).fit_predict(scaled)
 
@@ -163,8 +169,15 @@ def view_cluster():
             faces, facecolors=color, alpha=0.55, edgecolors='k', linewidths=0.8
         ))
 
+        # Flecha de dirección óptica (eje Z de la cámara)
+        pp       = _to_plot(pos)
+        dir_cam  = R_wc @ np.array([0, 0, 1])
+        dir_plot = np.array([dir_cam[0], -dir_cam[1], -dir_cam[2]])
+        ax3d.quiver(*pp, *dir_plot,
+                    length=scale * 1.8, color=color,
+                    linewidth=2.5, arrow_length_ratio=0.3)
+
         # Etiqueta junto al apex: grupo + pitch + altura
-        pp = _to_plot(pos)
         ax3d.text(
             pp[0], pp[1], pp[2] + scale * 0.25,
             f"G{cid}\npitch {rep['pitch']:.0f}°\naltura {h_rel:.1f}",
