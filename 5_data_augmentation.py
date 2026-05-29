@@ -721,23 +721,19 @@ def compute_target_per_bin(original_labels, img_h, bins, total_target):
                     existing[b] += 1
                     break
 
-    # Prioridad inversa: bins subrepresentados reciben más del presupuesto
-    priorities  = {b: 1.0 / (existing[b] + 1.0) for b in bins}
-    total_prio  = sum(priorities.values())
+    # Base mínima garantizada para cada bin (evita que bins alcanzables queden sin intentos)
+    base = max(1, total_target // len(bins))
+
+    # Bonus para bins subrepresentados: prioridad inversa al conteo existente
+    priorities = {b: 1.0 / (existing[b] + 1.0) for b in bins}
+    total_prio = sum(priorities.values())
 
     targets = {}
-    allocated = 0
-    bins_by_priority = sorted(bins, key=lambda b: existing[b])  # menor → mayor prioridad
-
-    for b in bins_by_priority:
-        t = int(total_target * priorities[b] / total_prio)
-        targets[b] = max(1, t)
-        allocated  += targets[b]
-
-    # Dar el resto al bin más subrepresentado para no perder presupuesto
-    remainder = total_target - allocated
-    if remainder > 0:
-        targets[bins_by_priority[0]] += remainder
+    for b in bins:
+        bonus = int(total_target * priorities[b] / total_prio)
+        # max(base, bonus): nunca por debajo del mínimo garantizado.
+        # Bins subrepresentados reciben más; los sobrerepresentados conservan el base.
+        targets[b] = max(base, bonus)
 
     return targets, existing
 
