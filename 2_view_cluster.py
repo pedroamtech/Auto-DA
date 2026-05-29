@@ -20,26 +20,55 @@ import matplotlib.gridspec as gridspec
 from matplotlib.lines import Line2D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import (silhouette_score,
+                              calinski_harabasz_score,
+                              davies_bouldin_score)
 from sklearn.preprocessing import StandardScaler
 from tkinter import filedialog, Tk
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _optimal_clusters(scaled, max_k=10):
-    """Elige el k óptimo maximizando el Silhouette Score (k=2..max_k)."""
-    n      = len(scaled)
-    max_k  = min(max_k, n - 1)
-    if max_k < 2:
-        return 1
-    best_k, best_score = 2, -1.0
+def _optimal_clusters(scaled):
+    """
+    Elige k por consenso de tres métricas independientes:
+      · Silhouette Score  — cohesión intra vs separación inter  (↑ mejor)
+      · Calinski-Harabasz — ratio de varianza entre/dentro       (↑ mejor)
+      · Davies-Bouldin    — dispersión intra/inter cluster       (↓ mejor)
+
+    Las tres se normalizan a [0,1] y se promedian.
+    Rango: k=2 … min(√(n/2)+2, 20).
+    """
+    n     = len(scaled)
+    max_k = max(2, min(int(np.sqrt(n / 2)) + 2, 20, n - 1))
+
+    print(f'[CLUSTER] Evaluando k=2..{max_k} sobre {n} cámaras...')
+
+    ks, sil_v, ch_v, db_v = [], [], [], []
+    sample = min(2000, n)   # silhouette es O(n²) — subsample para velocidad
+
     for k in range(2, max_k + 1):
-        labels = KMeans(n_clusters=k, n_init=5, random_state=42).fit_predict(scaled)
-        score  = silhouette_score(scaled, labels)
-        if score > best_score:
-            best_score, best_k = score, k
-    print(f'[AUTO-CLUSTER] k={best_k}  (silhouette={best_score:.3f})')
+        labels = KMeans(n_clusters=k, n_init=20,
+                        random_state=42, max_iter=500).fit_predict(scaled)
+        ks.append(k)
+        sil_v.append(silhouette_score(scaled, labels,
+                                      sample_size=sample, random_state=42))
+        ch_v.append(calinski_harabasz_score(scaled, labels))
+        db_v.append(davies_bouldin_score(scaled, labels))
+
+    def _norm(arr):
+        lo, hi = min(arr), max(arr)
+        return [(v - lo) / (hi - lo + 1e-12) for v in arr]
+
+    score    = [(s + c + (1 - d)) / 3
+                for s, c, d in zip(_norm(sil_v), _norm(ch_v), _norm(db_v))]
+    best_idx = score.index(max(score))
+    best_k   = ks[best_idx]
+
+    print(f'[CLUSTER] k óptimo = {best_k}  |  '
+          f'sil={sil_v[best_idx]:.3f}  '
+          f'ch={ch_v[best_idx]:.0f}  '
+          f'db={db_v[best_idx]:.3f}')
     return best_k
 
 
@@ -105,12 +134,14 @@ def view_cluster():
 
     df = pd.read_csv(csv_path)
 
-    # ── Clustering por posición y altura ──────────────────────────────────────
+    # ── Clustering: posición + altura + pitch (4 features) ───────────────────
+    # pitch es crítico: la augmentación filtra por compatibilidad de ±25°,
+    # por lo que cámaras con diferente ángulo deben estar en clusters distintos.
     scaler     = StandardScaler()
-    scaled     = scaler.fit_transform(df[['pos_x', 'pos_y', 'height']].values)
+    scaled     = scaler.fit_transform(df[['pos_x', 'pos_y', 'height', 'pitch']].values)
     n_clusters = _optimal_clusters(scaled)
-    df['cluster'] = KMeans(n_clusters=n_clusters, n_init=10,
-                           random_state=42).fit_predict(scaled)
+    df['cluster'] = KMeans(n_clusters=n_clusters, n_init=20,
+                           random_state=42, max_iter=500).fit_predict(scaled)
 
     # ── Layout: vista 3D + 3 violines + tabla ─────────────────────────────────
     fig = plt.figure(figsize=(22, 10))
