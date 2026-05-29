@@ -96,13 +96,12 @@ def extract_information(batch_size=32):
             for j, img_path in tqdm(enumerate(batch_files), total=len(batch_files),
                                      desc=f"[{partition}] Batch {batch_num}/{n_batches}",
                                      unit="img", ncols=100):
-                # A. Guardar mapa de profundidad (escala de grises 8-bit)
+                # A. Guardar mapa de profundidad (16-bit PNG — 256x más resolución que uint8)
                 d_map = depth_data[j, :, :, 0]
                 d_min, d_max = d_map.min(), d_map.max()
                 norm_d = (d_map - d_min) / (d_max - d_min + 1e-8)
-                depth_gray = (norm_d * 255).astype(np.uint8)
-                depth_name = f"depth_{os.path.basename(img_path)}"
-                Image.fromarray(depth_gray).save(depth_dir / depth_name)
+                depth_name = f"depth_{os.path.splitext(os.path.basename(img_path))[0]}.png"
+                Image.fromarray((norm_d * 65535).astype(np.uint16)).save(depth_dir / depth_name)
 
                 # B. Pose (Mundo <- Cámara)
                 R, t = extrinsics[j][:3, :3], extrinsics[j][:3, 3]

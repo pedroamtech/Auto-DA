@@ -1,6 +1,7 @@
 import time
 from tqdm import tqdm
 from glob import glob
+import os
 from os.path import join, basename
 from multiprocessing import Pool
 from pathlib import Path
@@ -38,17 +39,19 @@ def _poolCreation(args):
     if img is None:
         return []
 
-    depth_dir  = root_data / 'depth_maps'
-    depth_path = depth_dir / f"depth_{img_name}"
-    depth_map  = None
-    if depth_path.exists():
-        depth_map_raw = cv2.imread(str(depth_path), cv2.IMREAD_GRAYSCALE)
-        if depth_map_raw is not None:
-            h_img, w_img = img.shape[:2]
-            if depth_map_raw.shape[0] != h_img or depth_map_raw.shape[1] != w_img:
-                depth_map = cv2.resize(depth_map_raw, (w_img, h_img), interpolation=cv2.INTER_LINEAR)
-            else:
-                depth_map = depth_map_raw
+    depth_dir    = root_data / 'depth_maps'
+    img_stem     = os.path.splitext(img_name)[0]
+    h_img, w_img = img.shape[:2]
+    depth_map    = None
+    for d_name in [f'depth_{img_stem}.png', f'depth_{img_name}']:
+        d_path = depth_dir / d_name
+        if d_path.exists():
+            raw = cv2.imread(str(d_path), cv2.IMREAD_UNCHANGED)
+            if raw is not None:
+                max_val   = 65535.0 if raw.dtype == np.uint16 else 255.0
+                resized   = cv2.resize(raw, (w_img, h_img), interpolation=cv2.INTER_LINEAR)
+                depth_map = resized.astype(np.float32) / max_val
+            break
 
     height_img, width_img = img.shape[:2]
     cont       = 0
@@ -83,7 +86,7 @@ def _poolCreation(args):
                 if depth_map is not None:
                     crop_depth = depth_map[y:y+h, x:x+w]
                     if crop_depth.size > 0:
-                        depth_val = float(crop_depth.mean()) / 255.0
+                        depth_val = float(crop_depth.mean())
 
                 crops_info.append({
                     'name':           crop_path,

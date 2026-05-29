@@ -601,15 +601,14 @@ def augment_partition(partition: str):
 
         # ── Depth map ──────────────────────────────────────────────────────
         d_map = None
-        for stem in [bg_name,
-                     os.path.splitext(bg_name)[0] + '.jpg',
-                     os.path.splitext(bg_name)[0] + '.png']:
+        for stem in [os.path.splitext(bg_name)[0] + '.png', bg_name]:
             p = images_dir / DEPTH_SUBDIR / f'depth_{stem}'
             if p.exists():
-                raw = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+                raw = cv2.imread(str(p), cv2.IMREAD_UNCHANGED)
                 if raw is not None:
-                    d_map = cv2.resize(raw, (bg_w, bg_h),
-                                       interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255.0
+                    max_val = 65535.0 if raw.dtype == np.uint16 else 255.0
+                    d_map   = cv2.resize(raw, (bg_w, bg_h),
+                                         interpolation=cv2.INTER_LINEAR).astype(np.float32) / max_val
                     break
         if d_map is None:
             d_map = np.full((bg_h, bg_w), 0.5, dtype=np.float32)

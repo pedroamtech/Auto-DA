@@ -13,10 +13,12 @@ Changes from V1:
 
 from tqdm import tqdm
 from glob import glob
+import os
 from os.path import join, basename
 from multiprocessing import Pool
 from pathlib import Path
 from datetime import datetime
+import numpy as np
 import pandas as pd
 import cv2
 import config
@@ -52,17 +54,20 @@ def _poolCreation_v2(args):
     if img is None:
         return []
 
-    # Depth map (optional)
-    depth_path = root_data / 'images' / 'depth_maps' / f'depth_{img_name}'
-    depth_map  = None
-    if depth_path.exists():
-        raw = cv2.imread(str(depth_path), cv2.IMREAD_GRAYSCALE)
-        if raw is not None:
-            h_img, w_img = img.shape[:2]
-            depth_map = (
-                cv2.resize(raw, (w_img, h_img), interpolation=cv2.INTER_LINEAR)
-                if raw.shape[:2] != (h_img, w_img) else raw
-            )
+    # Depth map (optional) — soporta 8-bit y 16-bit PNG
+    depth_dir    = root_data / 'images' / 'depth_maps'
+    img_stem     = os.path.splitext(img_name)[0]
+    h_img, w_img = img.shape[:2]
+    depth_map    = None
+    for d_name in [f'depth_{img_stem}.png', f'depth_{img_name}']:
+        d_path = depth_dir / d_name
+        if d_path.exists():
+            raw = cv2.imread(str(d_path), cv2.IMREAD_UNCHANGED)
+            if raw is not None:
+                max_val   = 65535.0 if raw.dtype == np.uint16 else 255.0
+                resized   = cv2.resize(raw, (w_img, h_img), interpolation=cv2.INTER_LINEAR)
+                depth_map = resized.astype(np.float32) / max_val
+            break
 
     height_img, width_img = img.shape[:2]
     cont       = 0
@@ -104,7 +109,7 @@ def _poolCreation_v2(args):
             if depth_map is not None:
                 patch = depth_map[y:y+h, x:x+w]
                 if patch.size > 0:
-                    depth_val = float(patch.mean()) / 255.0
+                    depth_val = float(patch.mean())
 
             # ── V2: complete_body flag (aspect ratio heuristic) ────────────
             ar            = w / max(h, 1)
