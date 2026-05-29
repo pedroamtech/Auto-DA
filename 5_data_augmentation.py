@@ -117,8 +117,14 @@ FORBIDDEN_ADE20K = {
 }
 
 # ── Distribución espacial en cuadrícula ───────────────────────────────────────
-SPATIAL_GRID   = (3, 3)    # cuadrícula 3×3 para distribución uniforme
-N_CANDIDATES   = 300       # puntos candidatos a evaluar por celda
+SPATIAL_GRID   = (4, 4)    # cuadrícula 4×4 para distribución más granular
+N_CANDIDATES   = 500       # puntos candidatos a evaluar por selección de celda
+
+# ── Zonas de exclusión por tamaño de objeto ───────────────────────────────────
+# Los vehículos grandes necesitan mayor buffer para evitar que personas pequeñas
+# aparezcan adyacentes a ellos (rompe perspectiva).
+VEHICLE_CLASSES_ADE20K  = {20, 80, 83, 102}  # car, bus, truck, van
+VEHICLE_EXTRA_DILATION  = 60                  # px extra sobre SEG_DILATION_PX
 
 # ── Filtro anti-pixelación (SSIM) ─────────────────────────────────────────────
 MIN_SSIM       = 0.55      # parches con SSIM simulado < umbral se rechazan
@@ -307,14 +313,25 @@ def is_flat_ground(depth_map, x_ft, y_ft, nw, img_w, img_h):
 
 def bbox_overlaps_existing(x_ft, y_ft, nw, nh, placed):
     """
-    Return True if the candidate bbox overlaps any existing person's bbox
-    by more than MAX_IOU_OVERLAP of the smaller person's area.
-    Stored tuples: (x_feet, y_feet, nw, nh).
+    Rechaza si el candidato solapa o está demasiado cerca de una persona existente.
+
+    Dos controles complementarios:
+      1. Distancia mínima de pies: evita clustering incluso sin solapamiento de bbox.
+         Umbral = max(nw, pnw) * 0.9 — las personas deben estar separadas al menos
+         ~90% del ancho de la más ancha.
+      2. IoU sobre área del bbox menor: rechaza solapamiento > MAX_IOU_OVERLAP.
     """
     x1n, y1n = x_ft - nw // 2, y_ft - nh
     x2n, y2n = x_ft + nw // 2, y_ft
     area_n   = nw * nh
     for px, py, pnw, pnh in placed:
+        # ── Control 1: separación mínima entre centros ────────────────────
+        min_sep_x = (nw + pnw) * 0.55          # ~55% de la suma de anchos
+        min_sep_y = max(nh, pnh) * 0.40         # ~40% de la altura mayor
+        if abs(x_ft - px) < min_sep_x and abs(y_ft - py) < min_sep_y:
+            return True
+
+        # ── Control 2: IoU sobre bbox ─────────────────────────────────────
         x1p, y1p = px - pnw // 2, py - pnh
         x2p, y2p = px + pnw // 2, py
         ix1, iy1 = max(x1n, x1p), max(y1n, y1p)
@@ -397,12 +414,23 @@ def get_semantic_forbidden_mask(bg_img, seg_processor, seg_model):
         ).argmax(dim=1).squeeze().cpu().numpy().astype(np.int16)
 
         forbidden = np.zeros((bg_h, bg_w), dtype=np.uint8)
+        vehicles  = np.zeros((bg_h, bg_w), dtype=np.uint8)
         for cls_id in FORBIDDEN_ADE20K:
             forbidden[seg_map == cls_id] = 255
+        for cls_id in VEHICLE_CLASSES_ADE20K:
+            vehicles[seg_map == cls_id] = 255
 
+        # Dilación base para todas las clases prohibidas
         if SEG_DILATION_PX > 0:
             k         = np.ones((SEG_DILATION_PX, SEG_DILATION_PX), np.uint8)
             forbidden = cv2.dilate(forbidden, k, iterations=1)
+
+        # Dilación extra para vehículos: evita que personas pequeñas queden
+        # adyacentes a objetos grandes rompiendo la perspectiva
+        if vehicles.any():
+            total_v_dil = SEG_DILATION_PX + VEHICLE_EXTRA_DILATION
+            k_v         = np.ones((total_v_dil, total_v_dil), np.uint8)
+            forbidden   = cv2.bitwise_or(forbidden, cv2.dilate(vehicles, k_v))
 
         return forbidden
     except Exception as e:
@@ -760,9 +788,12 @@ def compute_native_size_stats(original_labels, img_h):
 
 def pick_placement_balanced(valid_y, valid_x, bg_h, bg_w, placed_feet):
     """
-    Selecciona un punto de colocación favoreciendo celdas de la cuadrícula
-    SPATIAL_GRID con menor densidad de personas ya colocadas.
-    Garantiza distribución espacial uniforme en toda la imagen.
+    Selecciona un punto de colocación favoreciendo celdas con menos personas.
+
+    Estrategia en dos pases:
+      Pase 1: sólo candidatos en celdas con conteo == mínimo absoluto.
+      Pase 2 (fallback): candidatos en celdas con conteo <= media + 1.
+    Esto evita el clustering que producía la condición min+1 original.
     """
     n = len(valid_x)
     if n == 0:
@@ -775,16 +806,28 @@ def pick_placement_balanced(valid_y, valid_x, bg_h, bg_w, placed_feet):
         c = min(int(px / bg_w * cols), cols - 1)
         cell_counts[r, c] += 1
 
-    min_count = int(cell_counts.min())
-    indices   = random.sample(range(n), min(N_CANDIDATES, n))
+    min_count  = int(cell_counts.min())
+    mean_count = float(cell_counts.mean())
+
+    indices = random.sample(range(n), min(N_CANDIDATES, n))
+
+    # Pase 1: preferir estrictamente las celdas menos pobladas (== mínimo)
     for i in indices:
         cx, cy = int(valid_x[i]), int(valid_y[i])
         r = min(int(cy / bg_h * rows), rows - 1)
         c = min(int(cx / bg_w * cols), cols - 1)
-        if cell_counts[r, c] <= min_count + 1:
+        if cell_counts[r, c] == min_count:
             return cx, cy
 
-    # Fallback: punto aleatorio
+    # Pase 2: relajar a celdas <= media + 1 (cuando el mínimo no tiene candidatos)
+    for i in indices:
+        cx, cy = int(valid_x[i]), int(valid_y[i])
+        r = min(int(cy / bg_h * rows), rows - 1)
+        c = min(int(cx / bg_w * cols), cols - 1)
+        if cell_counts[r, c] <= mean_count + 1:
+            return cx, cy
+
+    # Fallback final: punto aleatorio
     i = random.randint(0, n - 1)
     return int(valid_x[i]), int(valid_y[i])
 
