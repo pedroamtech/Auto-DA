@@ -50,7 +50,7 @@ cd Auto-DA
 conda create --name data_augmentation python=3.13.9
 conda activate data_augmentation
 
-pip install -r requirements_da.txt
+pip install -r requirements.txt
 ```
 
 ### Autenticación Hugging Face (recomendado)
