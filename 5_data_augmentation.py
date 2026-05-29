@@ -65,7 +65,7 @@ MIN_CROP_PX          = 10      # minimum dimension after resize
 
 # Placement quality
 BORDER_MARGIN        = 20      # ignore image border strip (px)
-MAX_FOOT_DEPTH_STD   = 0.12    # QC-4: depth std threshold for flat-ground check
+MAX_FOOT_DEPTH_STD   = 0.18    # QC-4: depth std threshold for flat-ground check
 MAX_IOU_OVERLAP      = 0.15    # QC-3: max allowed bbox overlap fraction vs smaller person
 MAX_CROP_REPEATS     = 2       # QC-5: max times same crop file is used in one image
 
@@ -925,19 +925,13 @@ def augment_partition(partition: str):
         # QC-5: track how many times each crop file has been used this image
         crop_usage: dict = {}
 
-        # ── Bins activos según tamaño nativo de personas en la imagen ─────
-        # Evita insertar personas cuyo tamaño rompería la coherencia de escala.
-        native_stats = compute_native_size_stats(original_labels, bg_h)
-        if native_stats:
-            h_max = native_stats['p90'] * NATIVE_MARGIN
-            active_bins = [(lo, hi) for lo, hi in SIZE_BINS_PX if lo < h_max]
-            if not active_bins:
-                active_bins = [SIZE_BINS_PX[0]]
-        else:
-            active_bins = SIZE_BINS_PX
+        # La predicción por profundidad (k-NN / power-law / fallback) es
+        # autorregulatoria: si todas las personas nativas son pequeñas, el k-NN
+        # predice alturas pequeñas para posiciones similares y los bins grandes
+        # simplemente no se llenan. No se necesita filtro explícito de bins.
 
         # ── Stratified placement ───────────────────────────────────────────
-        for bin_lo, bin_hi in active_bins:
+        for bin_lo, bin_hi in SIZE_BINS_PX:
             placed_in_bin = 0
             attempts      = 0
 
@@ -970,7 +964,10 @@ def augment_partition(partition: str):
                         if exp_h is not None:
                             stat_fb += 1
                         else:
-                            exp_h = (bin_lo + bin_hi) / 2.0
+                            # Sin predicción válida: saltar este punto.
+                            # Usar el midpoint del bin ignoraría la profundidad
+                            # y produciría personas a escala incorrecta.
+                            continue
 
                 # This depth location belongs to a different bin — try elsewhere
                 if not (bin_lo <= exp_h < bin_hi):
