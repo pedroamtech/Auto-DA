@@ -469,22 +469,19 @@ def make_placement_mask(bg_img, d_map, walkable_pts, pitch_deg, fy, cy_principal
 
 def warp_crop_to_angle(crop_img, mask_img, src_pitch_deg, dst_pitch_deg):
     """
-    Warp a person crop so its apparent shape matches the target scene's depression angle.
+    Aplica corrección de taper horizontal al parche para compensar la
+    diferencia de ángulo de depresión entre la cámara fuente y la de destino.
 
-    Physical model (standing person, flat ground, pinhole camera):
+    Solo se corrige el ANCHO DE LA CABEZA respecto a los pies (taper):
+      - Nadir      → cabeza angosta (se ve la profundidad corporal, no los hombros)
+      - Oblicuo    → cabeza ancha   (silueta frontal completa)
 
-      Vertical apparent height in image  ∝  cos(α)
-        α = 0°  (nadir)      → cos = 1  → person's body depth visible (blob)
-        α = 75° (oblique)    → cos ≈ 0.26 → nearly full standing height visible
+    La escala vertical NO se modifica: el resize posterior a (nw, nh) ya
+    ajusta la altura aparente correcta derivada de la predicción por profundidad.
+    Modificar la altura aquí causaría doble corrección y deformaría proporciones.
 
-      Top-edge width (head area) ∝  1 − 0.45·sin(α)
-        nadir   → narrow: camera sees front-to-back body depth, not shoulder width
-        oblique → wide:  full frontal silhouette
-
-    The foot row (bottom) always remains at the full original width; only the
-    head region and overall height change.
-
-    Returns (warped_crop, warped_mask), or originals if correction is negligible.
+    Solo actúa para diferencias de pitch en [5°, 15°]; fuera de ese rango
+    la corrección sería imperceptible (< 5°) o demasiado visible (> 15°).
     """
     if crop_img is None or mask_img is None:
         return crop_img, mask_img
@@ -493,39 +490,35 @@ def warp_crop_to_angle(crop_img, mask_img, src_pitch_deg, dst_pitch_deg):
         return crop_img, mask_img
 
     delta = abs(float(dst_pitch_deg) - float(src_pitch_deg))
-    if delta < 4.0:
-        return crop_img, mask_img          # negligible angle difference — skip
+    if delta < 5.0 or delta > 15.0:
+        return crop_img, mask_img
 
-    cos_src = max(0.08, abs(np.cos(np.radians(src_pitch_deg))))
-    cos_dst = max(0.08, abs(np.cos(np.radians(dst_pitch_deg))))
     sin_src = abs(np.sin(np.radians(src_pitch_deg)))
     sin_dst = abs(np.sin(np.radians(dst_pitch_deg)))
 
-    if cos_src < 0.09:
-        return crop_img, mask_img          # near-nadir source: can't undo top-down projection
+    # Fracción de ancho en la parte superior: 1 en oblicuo, ~0.65 en nadir
+    top_frac_src = max(0.40, 1.0 - 0.35 * sin_src)
+    top_frac_dst = max(0.40, 1.0 - 0.35 * sin_dst)
+    taper        = float(np.clip(top_frac_dst / top_frac_src, 0.88, 1.12))
 
-    # ── 1. Vertical scale ────────────────────────────────────────────────────
-    v_scale = float(np.clip(cos_dst / cos_src, 0.3, 3.0))
-    new_h   = max(4, int(h * v_scale))
+    if abs(taper - 1.0) < 0.03:      # corrección < 3% — no vale la pena
+        return crop_img, mask_img
 
-    # ── 2. Top-edge horizontal taper ─────────────────────────────────────────
-    top_frac_src = max(0.35, 1.0 - 0.45 * sin_src)
-    top_frac_dst = max(0.35, 1.0 - 0.45 * sin_dst)
-    taper        = float(np.clip(top_frac_dst / top_frac_src, 0.5, 1.4))
-    top_w        = max(2, min(w, int(w * taper)))
-    top_off      = (w - top_w) // 2
+    top_w   = max(2, min(w, int(w * taper)))
+    top_off = (w - top_w) // 2
 
-    # Perspective transform: rectangular source → trapezoidal destination
-    # Bottom full-width (feet), top tapered (head)
-    src_pts = np.float32([[0,     0    ], [w - 1,     0    ],
-                           [w - 1, h - 1], [0,         h - 1]])
-    dst_pts = np.float32([[top_off,           0        ], [top_off + top_w - 1, 0        ],
-                           [w - 1,            new_h - 1], [0,                   new_h - 1]])
+    # Transformación trapezoidal: pies = ancho completo, cabeza = ancho reducido/ampliado
+    src_pts = np.float32([[0,   0  ], [w-1, 0  ], [w-1, h-1], [0,   h-1]])
+    dst_pts = np.float32([
+        [top_off,           0  ],
+        [top_off + top_w-1, 0  ],
+        [w-1,               h-1],
+        [0,                 h-1],
+    ])
 
     M           = cv2.getPerspectiveTransform(src_pts, dst_pts)
-    flags_img   = cv2.INTER_AREA  if v_scale < 1.0 else cv2.INTER_LINEAR
-    warped_img  = cv2.warpPerspective(crop_img, M, (w, new_h), flags=flags_img)
-    warped_mask = cv2.warpPerspective(mask_img, M, (w, new_h), flags=cv2.INTER_NEAREST)
+    warped_img  = cv2.warpPerspective(crop_img, M, (w, h), flags=cv2.INTER_LINEAR)
+    warped_mask = cv2.warpPerspective(mask_img, M, (w, h), flags=cv2.INTER_NEAREST)
 
     return warped_img, warped_mask
 
@@ -762,24 +755,17 @@ def augment_partition(partition: str):
                     stat_qc6b += 1
                     continue
 
-                # QC-6: pre-compute perspective warp factor so dimension checks
-                # below use the post-warp height, not the source crop height.
+                # El warp solo ajusta el taper (ancho de cabeza), no la altura.
+                # h_eff es la altura original del parche; el resize lo lleva a exp_h.
                 src_pitch = safe_float(row.get('pitch', bg_pitch), bg_pitch)
-                delta_p   = abs(src_pitch - bg_pitch)
-                if delta_p >= 4.0:
-                    cos_s  = max(0.08, abs(np.cos(np.radians(src_pitch))))
-                    cos_d  = max(0.08, abs(np.cos(np.radians(bg_pitch))))
-                    warp_v = float(np.clip(cos_d / cos_s, 0.3, 3.0))
-                else:
-                    warp_v = 1.0
-                h_eff = max(4, int(row['height_patch'] * warp_v))
+                h_eff     = int(row['height_patch'])
 
-                scale = exp_h / h_eff
+                scale = exp_h / max(h_eff, 1)
                 if not (MIN_SCALE <= scale <= MAX_SCALE):
                     continue
 
                 nw = int(row['width_patch'] * scale)
-                nh = int(h_eff * scale)              # ≈ exp_h after warp+resize
+                nh = int(exp_h)
                 if nh < HEIGHT_AUG_LOW or nw < MIN_CROP_PX:
                     continue
                 if not (bin_lo <= nh < bin_hi):
@@ -807,8 +793,8 @@ def augment_partition(partition: str):
                 if crop_orig is None or mask_orig is None:
                     continue
 
-                # Perspective warp: compensate angle difference between source crop
-                # and target background (vertical scale + trapezoidal head taper)
+                # Perspective warp: solo taper horizontal (ancho cabeza vs pies)
+                # La altura no se modifica aquí — el resize a (nw, nh) es suficiente
                 crop_orig, mask_orig = warp_crop_to_angle(
                     crop_orig, mask_orig, src_pitch, bg_pitch
                 )
