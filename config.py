@@ -7,7 +7,7 @@ ROOT_DATA_AUG = 'C:/Users/pedroam/Documents/Data-Augmentation/Datasets/VisDrone'
 ROOT_OUTPUT_AUG = 'C:/Users/pedroam/Documents/Data-Augmentation/Output_Augmented'
 
 # Añadir esta línea a tu archivo config.py
-ROOT_VGGT_METADATA = 'C:/Users/pedroam/Documents/Data-Augmentation/Datasets/VisDrone/train/images/camera_data.csv'
+ROOT_VGGT_METADATA = 'C:/Users/pedroam/Documents/Data-Augmentation/Datasets/VisDrone/train/depth_maps/camera_data.csv'
 
 
 PARTITIONS = ['train']
