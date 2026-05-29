@@ -206,12 +206,13 @@ def augment_partition(partition: str):
             bg_meta = pd.Series({'pitch': -45.0, 'depth_min': 0.1, 'depth_max': 100.0, 'focal_y': 1000.0})
 
         d_map = None
-        for d_name in [f"depth_{bg_name}", f"depth_{os.path.splitext(bg_name)[0]}.jpg", f"depth_{os.path.splitext(bg_name)[0]}.png"]:
+        for d_name in [f"depth_{os.path.splitext(bg_name)[0]}.png", f"depth_{bg_name}"]:
             path = images_dir / DEPTH_MAPS_SUBDIR / d_name
             if path.exists():
-                d_map = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-                if d_map is not None:
-                    d_map = cv2.resize(d_map, (bg_w, bg_h), interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255.0
+                raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+                if raw is not None:
+                    max_val = 65535.0 if raw.dtype == np.uint16 else 255.0
+                    d_map   = cv2.resize(raw, (bg_w, bg_h), interpolation=cv2.INTER_LINEAR).astype(np.float32) / max_val
                     break
         if d_map is None: d_map = np.full((bg_h, bg_w), 0.5, dtype=np.float32)
 

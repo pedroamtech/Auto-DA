@@ -1,0 +1,53 @@
+# =============================================================================
+# DA-Seamless-Cloning — Dependencias del proyecto
+# Python 3.13 | CUDA 13.2
+# =============================================================================
+
+# PyTorch con soporte nativo CUDA 13.2
+# Instalar desde el índice oficial de PyTorch:
+--extra-index-url https://download.pytorch.org/whl/cu132
+torch
+torchvision
+torchaudio
+
+# =============================================================================
+# Dependencias principales
+# =============================================================================
+
+# Procesamiento numérico y de imágenes
+numpy>=2.0.0
+Pillow
+
+# Visualización
+matplotlib
+
+# Datos tabulares
+pandas
+
+# Clustering y escalado (1_view_cluster.py)
+scikit-learn
+
+# Visión por computadora
+opencv-python
+ultralytics>=8.1.0   # incluye YOLOv8x y SAM2; pesos descargados automáticamente:
+                     #   yolov8x.pt  (~130 MB) — detección de personas  (4_extract_masks.py)
+                     #   sam2_l.pt   (~428 MB) — segmentación de siluetas (4_extract_masks.py)
+
+# Pillow — necesario para guardar depth maps 16-bit PNG (1_extract_information.py)
+# (ya incluido arriba como dependencia de numpy/matplotlib, se lista explícitamente)
+
+# Barras de progreso
+tqdm
+
+# =============================================================================
+# Dependencias del modelo VGGT (1_extract_information.py)
+# =============================================================================
+
+# Descarga de pesos desde Hugging Face Hub
+huggingface_hub
+
+# Operaciones de tensor (requerido por la arquitectura VGGT)
+einops
+
+# Carga de pesos en formato safetensors
+safetensors

@@ -1,145 +1,163 @@
 # Auto-DA
 
-Pipeline de **Data Augmentation** para datasets de detección de personas desde UAV/dron, combinando estimación de cámara con IA (VGGT), segmentación de siluetas (YOLOv8x + SAM2-L) e inserción métrica basada en mapas de profundidad.
+Pipeline de **Data Augmentation** para datasets de detección de personas desde drones. Combina estimación de cámara con IA (VGGT), segmentación de siluetas (YOLOv8x + SAM2-L) y muestreo estratificado por tamaño para corregir la distribución de cola larga en el tamaño de personas.
 
-## Descripción
+## Objetivo
 
-El proyecto extrae parámetros de cámara de imágenes reales usando el modelo **VGGT** (Facebook Research), construye un pool de recortes de personas y los inserta en nuevas imágenes de fondo con escalado métrico basado en profundidad y alpha blending. Las rutas se configuran en `config.py` sin necesidad de diálogos interactivos.
+Los datasets de vigilancia aérea (VisDrone, etc.) tienen una distribución de cola larga en el tamaño de personas: abundan las medianas, escasean las muy pequeñas y muy grandes. Este pipeline inserta recortes de personas reales con escala físicamente correcta (ley perspectiva + mapa de profundidad) y los distribuye uniformemente en bins de tamaño para equilibrar esa distribución antes de entrenar modelos YOLO.
 
 ## Pipeline
 
 ```
-1_extract_information.py   →   2_view_cluster.py
-                                      ↓
-                               3_people_pool.py
-                                      ↓
+1_extract_information.py   →   (2_view_cluster.py)
+                                       ↓
+                              3_people_pool_v2.py
+                                       ↓
                                4_extract_masks.py
-                                      ↓
-                            5_data_augmentation.py
+                                       ↓
+                           5_data_augmentation_v2.py
 ```
 
 | Script | Función |
 |---|---|
-| `1_extract_information.py` | Extrae parámetros de cámara y genera depth maps con VGGT. Lee rutas desde `config.py`. Guarda `depth_maps/` y `camera_data.csv` al mismo nivel que `images/`. Muestra info de GPU/CUDA al inicio. |
-| `2_view_cluster.py` | Visualiza en 3D los grupos de cámaras (clustering KMeans). Pide el número de clusters por diálogo. |
-| `3_people_pool.py` | Recorta personas del dataset (YOLO labels), filtra por rango de altura y genera `pool.csv` con metadatos de cámara integrados. |
-| `4_extract_masks.py` | Pre-segmentación offline: pipeline **YOLOv8x → SAM2-L** para extraer siluetas de alta precisión. Muestra info de GPU/CUDA al inicio. |
-| `5_data_augmentation.py` | Inserción de personas con escalado métrico por profundidad y alpha blending. Genera un archivo `_aug.txt` por imagen con solo las bboxes aumentadas. |
+| `1_extract_information.py` | Extrae parámetros de cámara (pitch, focal, posición) y genera depth maps **16-bit PNG** con VGGT-1B. |
+| `2_view_cluster.py` | *(Opcional)* Visualiza en 3D los grupos de cámaras por posición (KMeans). |
+| `3_people_pool_v2.py` | Recorta personas del dataset, aplica filtros de tamaño (`HEIGHT_MIN`/`MAX`) y genera `pool.csv` con flags `complete_body` y `size_bin`. |
+| `4_extract_masks.py` | Pipeline **YOLOv8x → SAM2-L**: detección de persona → máscara de alta precisión. Reanudable. Pesos descargados automáticamente. |
+| `5_data_augmentation_v2.py` | Augmentación con muestreo estratificado por bins de tamaño, corrección de perspectiva (pitch), verificación de suelo plano y anti-solapamiento. |
 
-> Todos los scripts del pipeline imprimen el tiempo total de ejecución al finalizar (`00h 00m 00.00s`).
-
-### Scripts auxiliares — `tools/`
+### Scripts auxiliares
 
 | Script | Función |
 |---|---|
-| `tools/convert_okutama_to_yolo.py` | Convierte anotaciones Okutama-Action (tracking format) a archivos YOLO por frame. |
-| `tools/convert_manipal_to_yolo.py` | Convierte anotaciones Manipal-UAV (MOT-style o YOLO normalizado) a formato YOLO. Auto-detecta el formato de entrada. |
-| `tools/video_to_frames.py` | Extrae frames de un video y los guarda como imágenes. |
-| `tools/yolo_person_labeler.py` | Herramienta de etiquetado de personas en formato YOLO. |
-
-## Configuración — `config.py`
-
-Todas las rutas del pipeline se definen aquí. No se requieren diálogos interactivos.
-
-```python
-ROOT_DATA1       = 'ruta/al/dataset'        # raíz del dataset (contiene train/, val/, ...)
-ROOT_POOL_PERSON = 'ruta/al/pool_person'    # pool de recortes de personas
-ROOT_OUTPUT_AUG  = 'ruta/a/salida'          # imágenes y labels aumentados
-PARTITIONS       = ['train']                # particiones a procesar
-HEIGHT_MIN       = 28   # altura mínima de crop aceptada (px)
-HEIGHT_MAX       = 79   # altura máxima de crop aceptada (px)
-HEIGHT_AUG_LOW   = 5    # altura mínima de inserción en imagen de salida (px)
-NUM_PEOPLE_X_IMG = 30   # personas a insertar por imagen
-```
-
-### Estructura esperada del dataset
-
-```
-ROOT_DATA1/
-└── train/
-    ├── images/          ← imágenes originales
-    ├── labels/          ← anotaciones YOLO (.txt)
-    └── depth_maps/      ← generado por 1_extract_information.py
-        └── camera_data.csv
-```
+| `tools/video_to_frames.py` | Extrae frames de un video. |
+| `tools/yolo_person_labeler.py` | Etiquetado manual/automático de personas en formato YOLO. |
 
 ## Requisitos
 
 ### Entorno
 
-- **Python** 3.13 (recomendado entorno conda)
-- **CUDA** 13.2 (recomendado, GPU NVIDIA)
+- **Python** 3.13.9 — entorno conda recomendado
+- **CUDA** 13.2 — GPU NVIDIA recomendada
+- **PyTorch** compatible con CUDA 13.2
 
 ### Instalación
 
-1. **Clonar el repositorio:**
 ```bash
 git clone https://github.com/pedroamtech/Auto-DA.git
 cd Auto-DA
+
+conda create --name data_augmentation python=3.13.9
+conda activate data_augmentation
+
+pip install -r requirements_da.txt
 ```
 
-2. **Crear y activar el entorno conda:**
-```bash
-conda create --name auto_da python=3.13
-conda activate auto_da
-```
+### Autenticación Hugging Face (recomendado)
 
-3. **Instalar dependencias:**
-```bash
-pip install -r requirements.txt
-```
+Evita límites de velocidad al descargar VGGT-1B:
 
-### Autenticación Hugging Face
-
-Necesaria para descargar el modelo VGGT-1B en el paso 1.
-
-1. Regístrate en [huggingface.co/join](https://huggingface.co/join).
-2. Crea un token **Read** en [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
-3. Configura la variable de entorno:
-
+1. Crea token **Read** en [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+2. Configúralo en Windows:
 ```powershell
-# Windows (PowerShell)
 [System.Environment]::SetEnvironmentVariable('HF_TOKEN', 'TU_TOKEN_AQUI', 'User')
 ```
+
+## Configuración
+
+Edita `config.py` antes de ejecutar:
+
+```python
+ROOT_DATA1        = 'ruta/dataset'           # carpeta con train/images/ y train/labels/
+ROOT_POOL_PERSON  = 'ruta/pool_person'       # salida del pool de recortes
+ROOT_OUTPUT_AUG   = 'ruta/output_augmented'  # salida de las imágenes aumentadas
+ROOT_VGGT_METADATA = 'ruta/dataset/train/images/camera_data.csv'  # generado en paso 1
+
+HEIGHT_MIN        = 28     # altura mínima (px) de crops aceptados en el pool
+HEIGHT_MAX        = 79     # altura máxima (px)
+NUM_PEOPLE_X_IMG  = 30     # personas a insertar por imagen de fondo
+PARTITIONS        = ['train']
+```
+
+## Uso
+
+### Paso 1 — Extraer parámetros de cámara y depth maps
+
+```bash
+python 1_extract_information.py
+```
+
+Genera en `train/images/depth_maps/`: depth maps **16-bit PNG** (`depth_*.png`) y `camera_data.csv`.
+Descarga VGGT-1B (~3.7 GB) la primera vez.
+
+### Paso 2 — (Opcional) Visualizar clusters de cámara
+
+```bash
+python 2_view_cluster.py
+```
+
+### Paso 3 — Construir pool de personas
+
+```bash
+python 3_people_pool_v2.py
+```
+
+Genera `pool_person/train/pool.csv` con columnas `complete_body` y `size_bin`.
+Muestra la distribución de recortes por bin al terminar.
+
+### Paso 4 — Extraer máscaras de siluetas
+
+```bash
+python 4_extract_masks.py
+```
+
+Descarga `yolov8x.pt` (~130 MB) y `sam2_l.pt` (~428 MB) la primera vez.
+Genera `pool_person/train/masks/` y `metadata/`. **Reanudable** si se interrumpe.
+
+### Paso 5 — Augmentación estratificada
+
+```bash
+python 5_data_augmentation_v2.py
+```
+
+Genera imágenes y etiquetas en `ROOT_OUTPUT_AUG/train/`.
+Muestra la distribución de alturas insertadas por bin al terminar.
 
 ## Estructura del Proyecto
 
 ```
 Auto-DA/
-├── 1_extract_information.py     # Paso 1: Extracción de cámara y depth maps
-├── 2_view_cluster.py            # Paso 2: Visualización de clusters
-├── 3_people_pool.py             # Paso 3: Creación del pool de personas
-├── 4_extract_masks.py           # Paso 4: Pre-segmentación (YOLOv8x + SAM2-L)
-├── 5_data_augmentation.py       # Paso 5: Augmentación con escalado métrico
-├── config.py                    # Configuración global de rutas y parámetros
-├── vggt/                        # Código fuente del modelo VGGT
-├── tools/                       # Conversión de datasets y utilidades
-├── back/                        # Versiones anteriores de scripts
-├── VGGT.pdf                     # Paper de referencia
-└── README.md
+├── 1_extract_information.py      # Paso 1: cámara + depth maps 16-bit
+├── 2_view_cluster.py             # (Opcional) visualización 3D de clusters
+├── 3_people_pool_v2.py           # Paso 3: pool con filtros de tamaño
+├── 4_extract_masks.py            # Paso 4: YOLO + SAM2 segmentación
+├── 5_data_augmentation_v2.py     # Paso 5: augmentación estratificada
+├── config.py                     # Rutas y parámetros globales
+├── vggt/                         # Código fuente modelo VGGT-1B
+├── tools/                        # Herramientas auxiliares
+├── back/                         # Versiones anteriores de los scripts
+└── requirements_da.txt
 ```
 
-## Salidas del pipeline
-
-Por cada imagen aumentada se generan en `ROOT_OUTPUT_AUG/{partition}/`:
+## Salida esperada
 
 ```
-images/
-└── {nombre}_aug_HHMMSSffffff.jpg            ← imagen con personas insertadas
-
-labels/
-├── {nombre}_aug_HHMMSSffffff.txt            ← todas las bboxes (original + aumentadas) en formato YOLO
-└── {nombre}_aug_HHMMSSffffff_aug.txt        ← solo las bboxes insertadas por aumentación
+ROOT_OUTPUT_AUG/
+└── train/
+    ├── images/
+    │   └── <nombre>_v2_<timestamp>.jpg
+    └── labels/
+        ├── <nombre>_v2_<timestamp>.txt       # etiquetas completas (orig + aug)
+        └── <nombre>_v2_<timestamp>_aug.txt   # solo personas insertadas
 ```
 
 ## Tecnologías
 
-- **[VGGT](https://github.com/facebookresearch/vggt)** — Estimación de cámara y profundidad (Facebook Research).
-- **OpenCV** — Procesamiento de imagen y alpha blending.
-- **Ultralytics YOLOv8x** — Detección de personas para pre-segmentación.
-- **Ultralytics SAM2-L** — Segmentación de alta precisión (Meta AI). Pesos descargados automáticamente (`yolov8x.pt` ~130 MB, `sam2_l.pt` ~428 MB).
-- **scikit-learn KMeans** — Agrupación de vistas de cámara.
-- **Hugging Face Hub** — Descarga del modelo VGGT-1B.
+- **[VGGT](https://github.com/facebookresearch/vggt)** — Estimación de cámara y depth maps (Facebook Research)
+- **Ultralytics YOLOv8x** — Detección de personas (bounding box)
+- **Ultralytics SAM2-L** — Segmentación de siluetas de alta precisión (Meta AI)
+- **OpenCV** — Procesamiento de imagen y alpha blending
+- **Hugging Face Hub** — Descarga del modelo VGGT-1B
 
 ## Autor
 

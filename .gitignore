@@ -1,0 +1,20 @@
+# Pesos de modelos (archivos grandes, no se versionan)
+*.pt
+*.pth
+*.ckpt
+weights/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Entorno virtual
+.env
+.venv
+env/
+venv/
+
+# IDEs
+.vscode/
+.idea/
