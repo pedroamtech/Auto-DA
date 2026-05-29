@@ -83,9 +83,8 @@ PARTITIONS      = config.PARTITIONS
 import torch as _torch_check
 DEVICE = 'cuda:0' if _torch_check.cuda.is_available() else 'cpu'
 
-SIZE_BINS_PX   = [(10, 25), (25, 45), (45, 70), (70, 104)]
-TARGET_PER_BIN = max(1, NUM_PEOPLE_PER_IMAGE // len(SIZE_BINS_PX))
-MAX_ATTEMPTS   = 30
+SIZE_BINS_PX = [(10, 25), (25, 45), (45, 70), (70, 104)]
+MAX_ATTEMPTS = 40   # intentos máximos por unidad de target
 
 # ── Segmentación semántica (SegFormer-B2 ADE20K) ──────────────────────────────
 SEGFORMER_MODEL  = 'nvidia/segformer-b2-finetuned-ade-512-512'
@@ -695,8 +694,52 @@ def paste_crop(canvas, crop, mask_gray, x1, y1, nw, nh):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# BLOCK 7.5 — HELPERS: NATIVE SIZE STATS · BALANCED PLACEMENT · SSIM QC
+# BLOCK 7.5 — HELPERS: TARGET DISTRIBUTION · BALANCED PLACEMENT · SSIM QC
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def compute_target_per_bin(original_labels, img_h, bins, total_target):
+    """
+    Calcula cuántas personas insertar por bin para moverse hacia una distribución
+    UNIFORME entre bins (atacar la cola larga).
+
+    Estrategia: prioridad inversa al conteo existente.
+      - Bin con 0 personas existentes  → prioridad máxima (1/1   = 1.00)
+      - Bin con 9 personas existentes  → prioridad media  (1/10  = 0.10)
+      - Bin con 99 personas existentes → prioridad baja   (1/100 = 0.01)
+
+    El presupuesto total (total_target) se reparte proporcionalmente a las
+    prioridades, de modo que los bins más subrepresentados reciben más intentos.
+    """
+    # Contar personas existentes por bin
+    existing = {b: 0 for b in bins}
+    for lbl in original_labels:
+        parts = lbl.split()
+        if len(parts) >= 5 and parts[0] == '0':
+            h_px = float(parts[4]) * img_h
+            for b in bins:
+                if b[0] <= h_px < b[1]:
+                    existing[b] += 1
+                    break
+
+    # Prioridad inversa: bins subrepresentados reciben más del presupuesto
+    priorities  = {b: 1.0 / (existing[b] + 1.0) for b in bins}
+    total_prio  = sum(priorities.values())
+
+    targets = {}
+    allocated = 0
+    bins_by_priority = sorted(bins, key=lambda b: existing[b])  # menor → mayor prioridad
+
+    for b in bins_by_priority:
+        t = int(total_target * priorities[b] / total_prio)
+        targets[b] = max(1, t)
+        allocated  += targets[b]
+
+    # Dar el resto al bin más subrepresentado para no perder presupuesto
+    remainder = total_target - allocated
+    if remainder > 0:
+        targets[bins_by_priority[0]] += remainder
+
+    return targets, existing
 
 def compute_native_size_stats(original_labels, img_h):
     """
@@ -812,7 +855,8 @@ def augment_partition(partition: str):
     stat_knn   = 0; stat_model    = 0; stat_fb    = 0
     stat_qc1   = 0; stat_qc3      = 0; stat_flat  = 0; stat_qc6b = 0
     stat_qc7   = 0  # pixelation rejections
-    partition_heights = []
+    partition_heights      = []   # alturas insertadas
+    partition_orig_heights = []   # alturas originales (para medir balance)
 
     print(f'\n[{partition}] {len(bg_images)} images | pool: {len(df_pool)} crops')
 
@@ -925,17 +969,28 @@ def augment_partition(partition: str):
         # QC-5: track how many times each crop file has been used this image
         crop_usage: dict = {}
 
-        # La predicción por profundidad (k-NN / power-law / fallback) es
-        # autorregulatoria: si todas las personas nativas son pequeñas, el k-NN
-        # predice alturas pequeñas para posiciones similares y los bins grandes
-        # simplemente no se llenan. No se necesita filtro explícito de bins.
+        # ── Targets por bin: prioridad inversa al conteo existente ───────────
+        # Los bins subrepresentados en esta imagen reciben más presupuesto,
+        # moviendo activamente la distribución hacia la uniformidad.
+        targets, existing_counts = compute_target_per_bin(
+            original_labels, bg_h, SIZE_BINS_PX, NUM_PEOPLE_PER_IMAGE
+        )
+
+        # Acumular distribución original para estadísticas de partición
+        for h_px in existing_counts.values():
+            pass  # existing_counts ya tiene el conteo; se usa más abajo en stats
+        for lbl in original_labels:
+            parts = lbl.split()
+            if len(parts) >= 5 and parts[0] == '0':
+                partition_orig_heights.append(float(parts[4]) * bg_h)
 
         # ── Stratified placement ───────────────────────────────────────────
         for bin_lo, bin_hi in SIZE_BINS_PX:
+            bin_target    = targets[(bin_lo, bin_hi)]
             placed_in_bin = 0
             attempts      = 0
 
-            while placed_in_bin < TARGET_PER_BIN and attempts < MAX_ATTEMPTS * TARGET_PER_BIN:
+            while placed_in_bin < bin_target and attempts < MAX_ATTEMPTS * bin_target:
                 attempts += 1
 
                 # Punto balanceado: favorece celdas con menos personas
@@ -1095,42 +1150,63 @@ def augment_partition(partition: str):
             f.write('\n'.join(aug_labels))
 
     # ── Partition summary ─────────────────────────────────────────────────
-    sem_mode = 'SegFormer' if seg_model is not None else 'HSV heuristic'
+    sem_mode = 'SegFormer' if seg_model is not None else 'depth-only fallback'
     print(f'\n[{partition}] Placed: {n_placed} | Images skipped: {n_skipped_img}')
     print(f'  Placement mask: {sem_mode}')
     print(f'  Scale method  — kNN-depth: {stat_knn} | power-law: {stat_model} | fallback: {stat_fb}')
-    print(f'  Rejected      — QC-1 (resolution): {stat_qc1} | QC-3 (spacing): {stat_qc3} | '
-          f'QC-4 (flat-ground): {stat_flat} | QC-6b (body): {stat_qc6b} | QC-7 (SSIM): {stat_qc7}')
-    _print_distribution(partition, partition_heights)
-    _save_distribution(ROOT_OUTPUT_AUG / partition, partition, partition_heights)
+    print(f'  Rejected      — QC-1: {stat_qc1} | QC-3: {stat_qc3} | '
+          f'QC-4: {stat_flat} | QC-6b: {stat_qc6b} | QC-7: {stat_qc7}')
+    _print_distribution(partition, partition_orig_heights, partition_heights)
+    _save_distribution(ROOT_OUTPUT_AUG / partition, partition,
+                       partition_orig_heights, partition_heights)
 
 
-def _print_distribution(partition, heights):
-    total = len(heights)
-    if total == 0:
-        print(f'  [{partition}] No persons inserted.'); return
-    print(f'\nHeight distribution — {partition} ({total} persons):')
+def _print_distribution(partition, orig_heights, inserted_heights):
+    """
+    Muestra distribución original, insertada y combinada por bin.
+    Permite verificar si el aumento de datos está corrigiendo la cola larga.
+    """
+    n_orig = len(orig_heights)
+    n_ins  = len(inserted_heights)
+    if n_ins == 0:
+        print(f'\n[{partition}] No persons inserted.'); return
+
+    print(f'\n{"─"*65}')
+    print(f'  Distribución de tamaños — {partition}')
+    print(f'  Original: {n_orig} | Insertadas: {n_ins} | Total: {n_orig + n_ins}')
+    print(f'  {"Bin":>10}  {"Orig":>6} {"Orig%":>6}  {"Ins":>6} {"Ins%":>6}  {"Comb":>6} {"Comb%":>6}')
+    print(f'  {"─"*60}')
     for lo, hi in SIZE_BINS_PX:
-        count = sum(1 for h in heights if lo <= h < hi)
-        pct   = 100 * count / total
-        print(f'  [{lo:3d}–{hi:3d}px]: {count:5d} ({pct:5.1f}%) {"█" * int(pct/2)}')
+        c_o = sum(1 for h in orig_heights     if lo <= h < hi)
+        c_i = sum(1 for h in inserted_heights if lo <= h < hi)
+        c_c = c_o + c_i
+        p_o = 100 * c_o / max(n_orig, 1)
+        p_i = 100 * c_i / max(n_ins,  1)
+        p_c = 100 * c_c / max(n_orig + n_ins, 1)
+        bar = '█' * int(p_c / 3)
+        print(f'  [{lo:3d}–{hi:3d}px]  {c_o:6d} {p_o:5.1f}%  {c_i:6d} {p_i:5.1f}%  {c_c:6d} {p_c:5.1f}%  {bar}')
+    print(f'{"─"*65}')
 
 
-def _save_distribution(out_dir, partition, heights):
-    if not heights:
+def _save_distribution(out_dir, partition, orig_heights, inserted_heights):
+    if not inserted_heights:
         return
-    pd.DataFrame({'height_px': heights}).to_csv(
-        str(out_dir / f'size_distribution_v2_{partition}.csv'), index=False
+    rows = (
+        [{'height_px': h, 'source': 'original'} for h in orig_heights] +
+        [{'height_px': h, 'source': 'inserted'} for h in inserted_heights]
+    )
+    pd.DataFrame(rows).to_csv(
+        str(out_dir / f'size_distribution_{partition}.csv'), index=False
     )
 
 
 if __name__ == '__main__':
     print('=' * 60)
-    print('  Data Augmentation V2 — Geometrically-Consistent Placement')
-    print(f'  Bins: {SIZE_BINS_PX}  |  Target/bin: {TARGET_PER_BIN}')
+    print('  Data Augmentation — Long-Tail Balanced Person Insertion')
+    print(f'  Bins: {SIZE_BINS_PX}  |  Budget/imagen: {NUM_PEOPLE_PER_IMAGE} (repartido por prioridad inversa)')
     print(f'  Partitions: {PARTITIONS}')
-    print(f'  Semantic mask: {"SegFormer-B2 (ADE20K)" if SEGFORMER_AVAILABLE else "HSV fallback (pip install transformers)"}')
-    print(f'  Spatial grid: {SPATIAL_GRID}  |  Native size margin: {NATIVE_MARGIN}x')
+    print(f'  Semantic mask: {"SegFormer-B2 (ADE20K)" if SEGFORMER_AVAILABLE else "depth-only fallback (pip install transformers)"}')
+    print(f'  Spatial grid: {SPATIAL_GRID}  |  Max attempts/unit: {MAX_ATTEMPTS}')
     print(f'  QC-1 max_upscale={MAX_UPSCALE}x  |  QC-3 max_iou={MAX_IOU_OVERLAP}  |  QC-5 max_repeats={MAX_CROP_REPEATS}  |  QC-7 min_ssim={MIN_SSIM}')
     print('=' * 60)
     t0 = time.perf_counter()
