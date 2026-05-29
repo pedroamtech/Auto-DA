@@ -73,20 +73,39 @@ def extract_mask(crop_orig, det_model, sam_model):
 
     mask_binary = (mask_binary * 255).astype(np.uint8)
 
-    # --- 3. Heurísticas de calidad ---
+    # --- 3. Métricas de forma (contorno del componente principal) ---
+    cnts, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if cnts:
+        cnt       = max(cnts, key=cv2.contourArea)
+        cnt_area  = float(cv2.contourArea(cnt))
+        perimeter = float(cv2.arcLength(cnt, True))
+        hull_area = float(cv2.contourArea(cv2.convexHull(cnt)))
+        # solidity:   área / casco convexo  → 1 = forma convexa compacta
+        # smoothness: 4π·área / perímetro²  → 1 = círculo perfecto
+        solidity   = cnt_area / hull_area   if hull_area   > 0 else 0.0
+        smoothness = (4 * np.pi * cnt_area / perimeter**2) if perimeter > 0 else 0.0
+    else:
+        solidity, smoothness = 0.0, 0.0
+
+    # --- 4. Heurísticas de calidad ---
     stats = {
         "area_ratio":         float(cv2.countNonZero(mask_binary) / (w * h)),
         "bottom_width_ratio": float(np.count_nonzero(mask_binary[-1, :]) / w),
         "top_width_ratio":    float(np.count_nonzero(mask_binary[0, :])  / w),
         "left_height_ratio":  float(np.count_nonzero(mask_binary[:, 0])  / h),
         "right_height_ratio": float(np.count_nonzero(mask_binary[:, -1]) / h),
+        "solidity":           round(solidity,   4),
+        "smoothness":         round(smoothness, 4),
         "is_valid": True,
     }
 
-    if stats["area_ratio"] < 0.15:                                       stats["is_valid"] = False
-    if stats["bottom_width_ratio"] > 0.45:                               stats["is_valid"] = False
-    if stats["top_width_ratio"] > 0.35:                                  stats["is_valid"] = False
-    if stats["left_height_ratio"] > 0.40 or stats["right_height_ratio"] > 0.40: stats["is_valid"] = False
+    if stats["area_ratio"]         < 0.15: stats["is_valid"] = False
+    if stats["bottom_width_ratio"] > 0.45: stats["is_valid"] = False
+    if stats["top_width_ratio"]    > 0.35: stats["is_valid"] = False
+    if stats["left_height_ratio"]  > 0.40 or stats["right_height_ratio"] > 0.40:
+        stats["is_valid"] = False
+    if stats["solidity"]           < 0.55: stats["is_valid"] = False  # máscara fragmentada
+    if stats["smoothness"]         < 0.10: stats["is_valid"] = False  # contorno muy irregular
 
     return mask_binary, stats
 

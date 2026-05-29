@@ -97,10 +97,12 @@ def safe_float(val, default=1000.0):
 # the same VGGT depth map (which it is, even if absolute scale is arbitrary).
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def parse_reference_persons(label_path, depth_map, img_w, img_h):
+def parse_reference_persons(label_path, depth_map, depth_map_raw, img_w, img_h):
     """
     Extract reference scale anchors from existing labeled persons.
-    Returns list of dicts {x, y_feet, h, d} where d = depth_map[y_feet, x].
+    depth_map      : normalized [0,1]  — usado solo para excluir píxeles extremos.
+    depth_map_raw  : escala VGGT original — usado para los ratios de perspectiva.
+    Returns list of dicts {x, y_feet, h, d} where d = depth_map_raw[y_feet, x].
     """
     refs = []
     if label_path is None or not label_path.exists():
@@ -115,27 +117,29 @@ def parse_reference_persons(label_path, depth_map, img_w, img_h):
             h_px = float(parts[4]) * img_h
             if h_px < 6:
                 continue
-            x_ft = int(np.clip(xc, 0, img_w - 1))
-            y_ft = int(np.clip(yc + h_px * 0.45, 0, img_h - 1))
-            d    = float(depth_map[y_ft, x_ft])
-            if 0.02 < d < 0.97:
-                refs.append({'x': xc, 'y': float(y_ft), 'h': h_px, 'd': d})
+            x_ft  = int(np.clip(xc, 0, img_w - 1))
+            y_ft  = int(np.clip(yc + h_px * 0.45, 0, img_h - 1))
+            d_n   = float(depth_map[y_ft, x_ft])          # normalizado
+            d_raw = float(depth_map_raw[y_ft, x_ft])      # escala VGGT
+            if 0.02 < d_n < 0.97 and d_raw > 0:
+                refs.append({'x': xc, 'y': float(y_ft), 'h': h_px, 'd': d_raw})
     return refs
 
 
-def predict_height_from_refs(refs, x_q, y_q, depth_map, img_w, img_h):
+def predict_height_from_refs(refs, x_q, y_q, depth_map, depth_map_raw, img_w, img_h):
     """
-    Predict expected person height at (x_q, y_q) using k-nearest labeled persons
-    with inverse-distance-weighted depth-ratio interpolation.
-
-    Returns predicted pixel height (float) or None.
+    Predict expected person height at (x_q, y_q).
+    depth_map     : normalizado [0,1] — para la comprobación de umbral.
+    depth_map_raw : escala VGGT — para los ratios de perspectiva.
     """
     if not refs:
         return None
     x_q = float(x_q); y_q = float(y_q)
-    d_q = float(depth_map[int(np.clip(y_q, 0, img_h - 1)),
-                           int(np.clip(x_q, 0, img_w - 1))])
-    if d_q < 0.02:
+    yi  = int(np.clip(y_q, 0, img_h - 1))
+    xi  = int(np.clip(x_q, 0, img_w - 1))
+    d_q_n   = float(depth_map[yi, xi])
+    d_q_raw = float(depth_map_raw[yi, xi])
+    if d_q_n < 0.02 or d_q_raw <= 0:
         return None
 
     dists = np.array([
@@ -148,12 +152,11 @@ def predict_height_from_refs(refs, x_q, y_q, depth_map, img_w, img_h):
     preds, weights = [], []
     for i in idx:
         r = refs[i]
-        if r['d'] < 0.01:
+        if r['d'] <= 0:
             continue
-        # Perspective law: scale heights by depth ratio
-        h_pred = r['h'] * (r['d'] / d_q)
-        # Weight: inverse distance, dampened by relative depth difference
-        depth_penalty = abs(r['d'] - d_q) / (r['d'] + 1e-6)
+        # Ley de perspectiva con profundidades en escala VGGT (proporcional a Z real)
+        h_pred = r['h'] * (r['d'] / d_q_raw)
+        depth_penalty = abs(r['d'] - d_q_raw) / (r['d'] + 1e-6)
         w = 1.0 / (dists[i] * (1.0 + 2.0 * depth_penalty))
         preds.append(h_pred)
         weights.append(w)
@@ -162,16 +165,15 @@ def predict_height_from_refs(refs, x_q, y_q, depth_map, img_w, img_h):
         return None
     w_arr = np.array(weights, dtype=float)
     w_arr /= w_arr.sum()
-    h_pred = float(np.dot(preds, w_arr))
-    # Sanity clamp: predictions far outside typical range are noise
-    return float(np.clip(h_pred, 4.0, img_h * 0.35))
+    return float(np.clip(np.dot(preds, w_arr), 4.0, img_h * 0.35))
 
 
 # ─── Global power-law calibration (secondary fallback) ────────────────────────
-def build_calibration(label_path, depth_map, img_w, img_h):
+def build_calibration(label_path, depth_map, depth_map_raw, img_w, img_h):
     """
-    Fit h_px = k * depth^n across all labeled persons (global per-image model).
-    Secondary to k-NN; activates when k-NN returns None.
+    Fit h_px = k * depth_raw^n across all labeled persons (global per-image model).
+    depth_map     : normalizado [0,1] — para el umbral de exclusión.
+    depth_map_raw : escala VGGT — para el ajuste de potencia.
     """
     if label_path is None or not label_path.exists():
         return None
@@ -184,11 +186,12 @@ def build_calibration(label_path, depth_map, img_w, img_h):
             xc, yc, h_px = float(parts[1])*img_w, float(parts[2])*img_h, float(parts[4])*img_h
             if h_px < 8:
                 continue
-            x_ft = int(np.clip(xc, 0, img_w - 1))
-            y_ft = int(np.clip(yc + h_px * 0.45, 0, img_h - 1))
-            d    = float(depth_map[y_ft, x_ft])
-            if 0.03 < d < 0.97:
-                samples.append((d, h_px))
+            x_ft  = int(np.clip(xc, 0, img_w - 1))
+            y_ft  = int(np.clip(yc + h_px * 0.45, 0, img_h - 1))
+            d_n   = float(depth_map[y_ft, x_ft])
+            d_raw = float(depth_map_raw[y_ft, x_ft])
+            if 0.03 < d_n < 0.97 and d_raw > 0:
+                samples.append((d_raw, h_px))
     if len(samples) < MIN_REF_PERSONS:
         return None
     depths  = np.array([s[0] for s in samples])
@@ -204,18 +207,19 @@ def build_calibration(label_path, depth_map, img_w, img_h):
     return {'k': float(k), 'n': float(n)}
 
 
-def predict_height_from_model(cal, depth_norm):
-    if cal is None or depth_norm < 0.01:
+def predict_height_from_model(cal, depth_raw):
+    """cal fue ajustado sobre depth_raw → misma escala requerida."""
+    if cal is None or depth_raw <= 0:
         return None
-    return float(np.clip(cal['k'] * (depth_norm ** cal['n']), 4.0, 9999))
+    return float(np.clip(cal['k'] * (depth_raw ** cal['n']), 4.0, 9999))
 
 
 # ─── Last-resort depth-statistic fallback ─────────────────────────────────────
-def build_depth_fallback(depth_map, valid_y, valid_x, img_h):
+def build_depth_fallback(depth_map_raw, valid_y, valid_x, img_h):
     if len(valid_x) == 0:
         return None
-    d_med = float(np.median(depth_map[valid_y, valid_x]))
-    if d_med < 0.01:
+    d_med = float(np.median(depth_map_raw[valid_y, valid_x]))
+    if d_med <= 0:
         return None
     k = (img_h * H_TYPICAL_FRAC) * d_med
     return {'k': float(k), 'n': -1.0}
@@ -599,6 +603,10 @@ def augment_partition(partition: str):
         fy           = safe_float(bg_meta.get('focal_y', 1000.0), 1000.0)
         cy_principal = bg_h / 2.0   # VGGT always sets principal_y = H/2
 
+        # Rango de profundidad VGGT para reconstrucción de escala real
+        bg_d_min = safe_float(bg_meta.get('depth_min', 0.0), 0.0)
+        bg_d_max = safe_float(bg_meta.get('depth_max', 1.0), 1.0)
+
         # ── Depth map ──────────────────────────────────────────────────────
         d_map = None
         for stem in [os.path.splitext(bg_name)[0] + '.png', bg_name]:
@@ -612,6 +620,10 @@ def augment_partition(partition: str):
                     break
         if d_map is None:
             d_map = np.full((bg_h, bg_w), 0.5, dtype=np.float32)
+
+        # Reconstruir escala VGGT original: norm_d = (raw-d_min)/(d_max-d_min)
+        # → raw = norm_d*(d_max-d_min)+d_min   (necesario para ratios correctos)
+        d_map_r = d_map * (bg_d_max - bg_d_min) + bg_d_min
 
         # ── Original labels ────────────────────────────────────────────────
         original_labels = []
@@ -637,13 +649,13 @@ def augment_partition(partition: str):
 
         # ── Scale calibration (three-tier hierarchy) ───────────────────────
         # Tier 1: k-NN depth-ratio from labeled persons (most direct, QC-2)
-        refs = parse_reference_persons(lbl_path, d_map, bg_w, bg_h)
+        refs = parse_reference_persons(lbl_path, d_map, d_map_r, bg_w, bg_h)
 
         # Tier 2: global power-law model per image
-        calibration = build_calibration(lbl_path, d_map, bg_w, bg_h)
+        calibration = build_calibration(lbl_path, d_map, d_map_r, bg_w, bg_h)
 
         # Tier 3: depth-statistic fallback
-        fb_cal = build_depth_fallback(d_map, valid_y, valid_x, bg_h)
+        fb_cal = build_depth_fallback(d_map_r, valid_y, valid_x, bg_h)
 
         # ── Compatible pool ────────────────────────────────────────────────
         df_compat = df_pool[abs(df_pool['pitch'] - bg_pitch) <= PITCH_TOLERANCE].copy()
@@ -680,24 +692,26 @@ def augment_partition(partition: str):
             while placed_in_bin < TARGET_PER_BIN and attempts < MAX_ATTEMPTS * TARGET_PER_BIN:
                 attempts += 1
 
-                idx    = random.randint(0, len(valid_x) - 1)
-                x_feet = int(valid_x[idx])
-                y_feet = int(valid_y[idx])
-                d_feet = float(d_map[y_feet, x_feet])
+                idx      = random.randint(0, len(valid_x) - 1)
+                x_feet   = int(valid_x[idx])
+                y_feet   = int(valid_y[idx])
+                d_feet   = float(d_map[y_feet, x_feet])    # normalizado — umbral
+                d_feet_r = float(d_map_r[y_feet, x_feet])  # escala VGGT — ratios
 
-                if d_feet < 0.02:
+                if d_feet < 0.02 or d_feet_r <= 0:
                     continue
 
                 # ── Predict target height (three-tier hierarchy) ───────────
-                exp_h = predict_height_from_refs(refs, x_feet, y_feet, d_map, bg_w, bg_h)
+                exp_h = predict_height_from_refs(refs, x_feet, y_feet,
+                                                 d_map, d_map_r, bg_w, bg_h)
                 if exp_h is not None:
                     stat_knn += 1
                 else:
-                    exp_h = predict_height_from_model(calibration, d_feet)
+                    exp_h = predict_height_from_model(calibration, d_feet_r)
                     if exp_h is not None:
                         stat_model += 1
                     else:
-                        exp_h = predict_height_from_model(fb_cal, d_feet)
+                        exp_h = predict_height_from_model(fb_cal, d_feet_r)
                         if exp_h is not None:
                             stat_fb += 1
                         else:
@@ -733,6 +747,11 @@ def augment_partition(partition: str):
                 with open(json_p) as f:
                     stats = json.load(f)
                 if not stats.get('is_valid', False):
+                    continue
+                # Filtro de calidad de máscara (default=1.0 para JSONs sin estas métricas)
+                if stats.get('solidity',   1.0) < 0.55:
+                    continue
+                if stats.get('smoothness', 1.0) < 0.10:
                     continue
 
                 # QC-6b: oblique backgrounds require a complete body silhouette
