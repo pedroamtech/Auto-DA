@@ -4,6 +4,7 @@
 # =============================================================================
 
 # PyTorch con soporte CUDA 13.2
+# Instalar desde el índice oficial de PyTorch:
 --extra-index-url https://download.pytorch.org/whl/cu132
 torch
 torchvision
@@ -15,36 +16,41 @@ torchaudio
 
 # Procesamiento numérico y de imágenes
 numpy>=2.0.0
-Pillow
+Pillow              # necesario para guardar depth maps 16-bit PNG
 
-# Visualización
+# Visualización (2_view_cluster.py)
 matplotlib
 
 # Datos tabulares
 pandas
 
-# Clustering y escalado (2_view_cluster.py)
+# Clustering y métricas de validez de clusters (2_view_cluster.py)
 scikit-learn
 
 # Visión por computadora
-# (3_people_pool.py, 4_extract_masks.py, 5_data_augmentation.py,
-#  tools/yolo_person_labeler.py, tools/video_to_frames.py)
 opencv-python
-ultralytics>=8.1.0   # SAM2 incluido desde 8.1; pesos descargados automáticamente:
-                     #   yolov8x.pt  (~130 MB) — detección de personas
-                     #   sam2_l.pt   (~428 MB) — segmentación de siluetas
 
-# Barras de progreso (3_people_pool.py, 4_extract_masks.py, 5_data_augmentation.py)
+# Detección (YOLOv8x) + Segmentación (SAM2-L) — pesos descargados automáticamente:
+#   yolov8x.pt  (~130 MB) — detección de personas          (4_extract_masks.py)
+#   sam2_l.pt   (~428 MB) — segmentación de siluetas        (4_extract_masks.py)
+ultralytics>=8.1.0
+
+# Segmentación semántica SegFormer-B2 (ADE20K) — máscara de zonas válidas
+#   Modelo: nvidia/segformer-b2-finetuned-ade-512-512 (~85 MB, descarga automática)
+#   Si no está instalado, el script usa detección de suelo por profundidad (fallback)
+transformers>=4.40.0
+
+# Barras de progreso
 tqdm
 
 # =============================================================================
 # Dependencias del modelo VGGT (1_extract_information.py)
 # =============================================================================
 
-# Descarga de pesos desde Hugging Face Hub
+# Descarga de pesos desde Hugging Face Hub (~3.7 GB, descarga automática)
 huggingface_hub
 
-# Operaciones de tensor (requerido por la arquitectura VGGT)
+# Operaciones de tensor requeridas por la arquitectura VGGT
 einops
 
 # Carga de pesos en formato safetensors
