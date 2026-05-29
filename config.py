@@ -18,7 +18,7 @@ HEIGHT_MAX = 79 #pixels
 HEIGHT_AUG_LOW = 5 #pixels
 HEIGHT_AUG_HIGH = 10 #pixels
 
-NUM_PEOPLE_X_IMG = 30
+NUM_PEOPLE_X_IMG = 40
 
 
 
